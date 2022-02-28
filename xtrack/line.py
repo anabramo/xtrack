@@ -141,25 +141,30 @@ class Line:
 
         # Extract globals values from madx
         _var_values=defaultdict(lambda :0)
-        _mad_elements_dct = {}
 
         _ref_manager = manager=xd.Manager()
         _vref=manager.ref(_var_values,'vars')
         _fref=manager.ref(math,'f')
-        _lref = manager.ref(self.element_dict, 'line_dict')
-        _eref = _ref_manager.ref(_mad_elements_dct,'mad_elements_dct')
+        _lref = manager.ref(self.element_dict, 'element_refs')
 
-        self.vars = _vref
         self._var_management = {}
         self._var_management['data'] = {}
         self._var_management['data']['var_values'] = _var_values
-        self._var_management['data']['mad_elements_dct'] = _mad_elements_dct
 
         self._var_management['manager'] = _ref_manager
         self._var_management['lref'] = _lref
         self._var_management['vref'] = _vref
         self._var_management['fref'] = _fref
-        self._var_management['eref'] = _eref
+
+    @property
+    def vars(self):
+        if self._var_management is not None:
+            return self._var_management['vref']
+
+    @property
+    def element_refs(self):
+        if self._var_management is not None:
+            return self._var_management['lref']
 
     def __init__(self, elements=(), element_names=None, particle_ref=None):
         if isinstance(elements,dict):
@@ -183,6 +188,9 @@ class Line:
                     counters[nn] += 1
                     element_names.append(new_nn)
 
+            assert len(element_names) == len(elements), (
+                "`elements` and `element_names` should have the same length"
+            )
             element_dict = dict(zip(element_names, elements))
 
         self.element_dict=element_dict
@@ -191,7 +199,7 @@ class Line:
         self.particle_ref = particle_ref
 
         self._var_management = None
-        self.vars = None
+        self._needs_rng = False
 
     @property
     def elements(self):
@@ -241,6 +249,24 @@ class Line:
 
         return self.__class__(
                          elements=new_elements, element_names=new_element_names)
+
+    def configure_radiation(self, mode=None):
+        assert mode in [None, 'mean', 'quantum']
+        if mode == 'mean':
+            radiation_flag = 1
+        elif mode == 'quantum':
+            radiation_flag = 2
+        else:
+            radiation_flag = 0
+
+        for kk, ee in self.element_dict.items():
+            if hasattr(ee, 'radiation_flag'):
+                ee.radiation_flag = radiation_flag
+
+        if radiation_flag == 2:
+            self._needs_rng = True
+        else:
+            self._needs_rng = False
 
     def _freeze(self):
         self.element_names = tuple(self.element_names)
@@ -545,12 +571,10 @@ class Line:
             lref = self._var_management['lref']
             manager = self._var_management['manager']
             for ii in range(min([len(knl), len(element.knl)])):
-                if lref[element_name].knl[ii] in manager.tasks.keys():
-                    manager.tasks[lref[element_name].knl[ii]].expr += knl[ii]
+                lref[element_name].knl[ii] += knl[ii]
 
             for ii in range(min([len(ksl), len(element.ksl)])):
-                if lref[element_name].ksl[ii] in manager.tasks.keys():
-                    manager.tasks[lref[element_name].ksl[ii]].expr += ksl[ii]
+                lref[element_name].ksl[ii] += ksl[ii]
 
     def _apply_madx_errors(self, madx_sequence):
         """Applies errors from MAD-X sequence to existing

@@ -4,6 +4,9 @@ import xobjects as xo
 import xpart as xp
 
 from scipy.optimize import fsolve
+from scipy.constants import c as clight
+
+from .linear_normal_form import compute_linear_normal_form
 
 DEFAULT_STEPS_R_MATRIX = {
     'dx':1e-7, 'dpx':1e-10,
@@ -15,6 +18,7 @@ def find_closed_orbit(tracker, particle_co_guess=None, particle_ref=None,
                       co_search_settings=None):
 
     if particle_co_guess is None:
+        assert particle_ref is not None
         particle_co_guess = particle_ref.copy()
         particle_co_guess.x = 0
         particle_co_guess.px = 0
@@ -29,17 +33,25 @@ def find_closed_orbit(tracker, particle_co_guess=None, particle_ref=None,
     if co_search_settings is None:
         co_search_settings = {}
 
+    co_search_settings = co_search_settings.copy()
+    if 'xtol' not in co_search_settings.keys():
+        co_search_settings['xtol'] = 1e-6 # Relative error between calls
+
     particle_co_guess = particle_co_guess.copy(
                         _context=tracker._buffer.context)
 
-    res = fsolve(lambda p: p - _one_turn_map(p, particle_co_guess, tracker),
-          x0=np.array([particle_co_guess._xobject.x[0],
-                       particle_co_guess._xobject.px[0],
-                       particle_co_guess._xobject.y[0],
-                       particle_co_guess._xobject.py[0],
-                       particle_co_guess._xobject.zeta[0],
-                       particle_co_guess._xobject.delta[0]]),
-          **co_search_settings)
+    (res, infodict, ier, mesg
+        ) = fsolve(lambda p: p - _one_turn_map(p, particle_co_guess, tracker),
+              x0=np.array([particle_co_guess._xobject.x[0],
+                           particle_co_guess._xobject.px[0],
+                           particle_co_guess._xobject.y[0],
+                           particle_co_guess._xobject.py[0],
+                           particle_co_guess._xobject.zeta[0],
+                           particle_co_guess._xobject.delta[0]]),
+              full_output=True,
+              **co_search_settings)
+    fsolve_info = {
+        'res': res, 'info': infodict, 'ier': ier, 'mesg': mesg}
 
     particle_on_co = particle_co_guess.copy()
     particle_on_co.x = res[0]
@@ -48,6 +60,8 @@ def find_closed_orbit(tracker, particle_co_guess=None, particle_ref=None,
     particle_on_co.py = res[3]
     particle_on_co.zeta = res[4]
     particle_on_co.delta = res[5]
+
+    particle_on_co._fsolve_info = fsolve_info
 
     return particle_on_co
 
@@ -109,7 +123,9 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
         nemitt_x=1e-6, nemitt_y=2.5e-6,
         n_theta=1000, delta_disp=1e-5, delta_chrom = 1e-4,
         particle_co_guess=None, steps_r_matrix=None,
-        co_search_settings=None, at_elements=None):
+        co_search_settings=None, at_elements=None,
+        eneloss_and_damping=False,
+        symplectify=False):
 
     context = tracker._buffer.context
 
@@ -123,7 +139,7 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
     gemitt_x = nemitt_x/part_on_co._xobject.beta0[0]/part_on_co._xobject.gamma0[0]
     gemitt_y = nemitt_y/part_on_co._xobject.beta0[0]/part_on_co._xobject.gamma0[0]
 
-    W, Winv, Rot = xp.compute_linear_normal_form(RR)
+    W, Winv, Rot = compute_linear_normal_form(RR, symplectify=symplectify)
 
     s = np.array(tracker.line.get_s_elements())
 
@@ -140,12 +156,14 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
                         )
 
     part_disp = xp.build_particles(
-                    _context=context,
-                    x_norm=0,
-                    zeta=part_on_co.zeta[0], delta=[-delta_disp, +delta_disp],
-                    particle_on_co=part_on_co,
-                    scale_with_transverse_norm_emitt=(nemitt_x, nemitt_y),
-                    R_matrix=RR)
+        _context=context,
+        x_norm=0,
+        zeta=part_on_co.zeta[0],
+        delta=np.array([-delta_disp, +delta_disp])+part_on_co._xobject.delta[0],
+        particle_on_co=part_on_co,
+        scale_with_transverse_norm_emitt=(nemitt_x, nemitt_y),
+        R_matrix=RR,
+        symplectify=symplectify)
 
     part_for_twiss = xp.Particles.merge([part_for_twiss, part_disp])
 
@@ -155,6 +173,9 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
     y_co = tracker.record_last_track.y[4, :].copy()
     px_co = tracker.record_last_track.px[4, :].copy()
     py_co = tracker.record_last_track.py[4, :].copy()
+    zeta_co = tracker.record_last_track.zeta[4, :].copy()
+    delta_co = tracker.record_last_track.delta[4, :].copy()
+    psigma_co = tracker.record_last_track.psigma[4, :].copy()
 
     x_disp_minus = tracker.record_last_track.x[5, :].copy()
     y_disp_minus = tracker.record_last_track.y[5, :].copy()
@@ -186,12 +207,14 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
     alfx = - W4[0, 0, :] * W4[1, 0, :] - W4[0, 1, :] * W4[1, 1, :]
     alfy = - W4[2, 2, :] * W4[3, 2, :] - W4[2, 3, :] * W4[3, 3, :]
 
+    betz0 = W[4, 4]**2 + W[4, 5]**2
+
     mux = np.unwrap(np.arctan2(W4[0, 1, :], W4[0, 0, :]))/2/np.pi
     muy = np.unwrap(np.arctan2(W4[2, 3, :], W4[2, 2, :]))/2/np.pi
 
     eta = -((part_for_twiss._xobject.zeta[6] - part_for_twiss._xobject.zeta[5])
                 /(2*delta_disp)/tracker.line.get_length())
-    alpha = eta + 1/particle_ref.gamma0[0]**2
+    alpha = eta + 1/part_on_co._xobject.gamma0[0]**2
 
     part_chrom_plus = xp.build_particles(
                 _context=context,
@@ -199,12 +222,13 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
                 zeta=part_on_co.zeta[0], delta=delta_chrom,
                 particle_on_co=part_on_co,
                 scale_with_transverse_norm_emitt=(nemitt_x, nemitt_y),
-                R_matrix=RR)
+                R_matrix=RR, symplectify=symplectify)
     RR_chrom_plus = tracker.compute_one_turn_matrix_finite_differences(
                                             particle_on_co=part_chrom_plus.copy(),
                                             steps_r_matrix=steps_r_matrix)
     (WW_chrom_plus, WWinv_chrom_plus, Rot_chrom_plus
-        ) = xp.compute_linear_normal_form(RR_chrom_plus)
+        ) = compute_linear_normal_form(RR_chrom_plus,
+                                          symplectify=symplectify)
     qx_chrom_plus = np.angle(np.linalg.eig(Rot_chrom_plus)[0][0])/(2*np.pi)
     qy_chrom_plus = np.angle(np.linalg.eig(Rot_chrom_plus)[0][2])/(2*np.pi)
 
@@ -214,12 +238,13 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
                 zeta=part_on_co.zeta[0], delta=-delta_chrom,
                 particle_on_co=part_on_co,
                 scale_with_transverse_norm_emitt=(nemitt_x, nemitt_y),
-                R_matrix=RR)
+                R_matrix=RR, symplectify=symplectify)
     RR_chrom_minus = tracker.compute_one_turn_matrix_finite_differences(
                                         particle_on_co=part_chrom_minus.copy(),
                                         steps_r_matrix=steps_r_matrix)
     (WW_chrom_minus, WWinv_chrom_minus, Rot_chrom_minus
-        ) = xp.compute_linear_normal_form(RR_chrom_minus)
+        ) = compute_linear_normal_form(RR_chrom_minus,
+                                          symplectify=symplectify)
     qx_chrom_minus = np.angle(np.linalg.eig(Rot_chrom_minus)[0][0])/(2*np.pi)
     qy_chrom_minus = np.angle(np.linalg.eig(Rot_chrom_minus)[0][2])/(2*np.pi)
 
@@ -244,6 +269,36 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
 
     qs = np.angle(np.linalg.eig(Rot)[0][4])/(2*np.pi)
 
+    beta0 = part_on_co._xobject.beta0[0]
+    circumference = tracker.line.get_length()
+    T_rev = circumference/clight/beta0
+
+    if eneloss_and_damping:
+        diff_psigma = np.diff(psigma_co)
+        energy0 = part_on_co.mass0 * part_on_co._xobject.gamma0[0]
+        eloss_turn = -(sum(diff_psigma[diff_psigma<0]) * energy0)
+
+        # Get eigenvalues
+        w0, v0 = np.linalg.eig(RR)
+
+        # Sort eigenvalues
+        indx = [
+            int(np.floor(np.argmax(np.abs(v0[:, 2*ii]))/2)) for ii in range(3)]
+        eigenvals = np.array([w0[ii*2] for ii in indx])
+
+        # Damping constants and partition numbers
+        damping_constants_turns = -np.log(np.abs(eigenvals))
+        damping_constants_s = damping_constants_turns / T_rev
+        partition_numbers = (
+            damping_constants_turns* 2 * energy0/eloss_turn)
+
+        eneloss_damp_res = {
+            'eneloss_turn': eloss_turn,
+            'damping_constants_turns': damping_constants_turns,
+            'damping_constants_s':damping_constants_s,
+            'partition_numbers': partition_numbers
+        }
+
     twiss_res = {
         'name': tracker.line.element_names,
         's': s,
@@ -251,12 +306,16 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
         'px': px_co,
         'y': y_co,
         'py': py_co,
+        'zeta': zeta_co,
+        'delta': delta_co,
+        'psigma': psigma_co,
         'betx': betx,
         'bety': bety,
         'alfx': alfx,
         'alfy': alfy,
         'gamx': gamx,
         'gamy': gamy,
+        'betz0': betz0,
         'dx': dx,
         'dpx': dpx,
         'dy': dy,
@@ -270,9 +329,14 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
         'dqy': dqy,
         'slip_factor': eta,
         'momentum_compaction_factor': alpha,
+        'circumference': circumference,
+        'T_rev': T_rev,
         'R_matrix': RR,
         'particle_on_co':part_on_co.copy(_context=xo.context_default)
     }
+
+    if eneloss_and_damping:
+        twiss_res.update(eneloss_damp_res)
 
     # Downselect based on at_element
     enames = tracker.line.element_names
@@ -284,9 +348,10 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
             else:
                 assert nn in tracker.line.element_names
                 indx_twiss.append(enames.index(nn))
-        indx_twiss = sorted(indx_twiss)
 
         for kk, vv in twiss_res.items():
+            if eneloss_and_damping and kk in eneloss_damp_res.keys():
+                continue
             if hasattr(vv, '__len__') and len(vv) == len(s):
                 if isinstance(vv, np.ndarray):
                     twiss_res[kk] = vv[indx_twiss]

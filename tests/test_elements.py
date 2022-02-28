@@ -50,8 +50,8 @@ def test_drift():
                 py=-1.5e-5,
                 zeta=2.)
 
-        particles = xp.Particles(_context=ctx,
-                                 **dtk_particle.to_dict())
+        particles = xp.Particles.from_dict(dtk_particle.to_dict(),
+                                           _context=ctx)
 
         drift = xt.Drift(_context=ctx, length=10.)
         drift.track(particles)
@@ -79,9 +79,8 @@ def test_elens():
                 py=np.array([0.0]),
                 zeta=np.array([0.]))
 
-        particles = xp.Particles(_context=ctx,
-                                 **dtk_particle.to_dict())
-
+        particles = xp.Particles.from_dict(dtk_particle.to_dict(),
+                                           _context=ctx)
 
         elens = xt.Elens(_context=ctx,
                        inner_radius=1.1e-3,
@@ -147,8 +146,8 @@ def test_linear_transfer():
                 zeta=2.,
                 delta=2E-4)
 
-        particles = xp.Particles(_context=ctx,
-                                 **dtk_particle.to_dict())
+        particles = xp.Particles.from_dict(dtk_particle.to_dict(),
+                                           _context=ctx)
 
         alpha_x_0 = -0.5
         beta_x_0 = 100.0
@@ -231,8 +230,8 @@ def test_linear_transfer_chroma_detuning():
                 zeta=2.,
                 delta=2E-4)
 
-        particles = xp.Particles(_context=ctx,
-                                 **dtk_particle.to_dict())
+        particles = xp.Particles.from_dict(dtk_particle.to_dict(),
+                                           _context=ctx)
 
         alpha_x_0 = -0.5
         beta_x_0 = 100.0
@@ -308,6 +307,34 @@ def test_linear_transfer_chroma_detuning():
                           dtk_particle.delta, rtol=1e-14, atol=1e-14)
 
 
+def test_cavity():
+
+    for context in xo.context.get_test_contexts():
+        print(f"Test {context.__class__}")
+
+        cav = xt.Cavity(_context=context, frequency=0, lag=90, voltage=30)
+        part = xp.Particles(p0c=1e9, delta=[0, 1e-2], zeta=[0, 0.2], _context=context)
+        part0 = part.copy(_context=xo.ContextCpu())
+
+        cav.track(part)
+
+        part = part.copy(_context=xo.ContextCpu())
+
+        assert np.allclose(part.energy,
+                                part0.energy+cav.voltage, atol=5e-7, rtol=0)
+
+        Pc = np.sqrt(part.energy**2 - part.mass0**2)
+        delta = Pc/part.p0c - 1
+        beta = Pc/part.energy
+
+        tau0 = part0.zeta/(part0.beta0 * part0.rvv)
+        tau = part.zeta/(part.beta0 * part.rvv)
+
+        assert np.allclose(part.delta, delta, atol=1e-14, rtol=0)
+        assert np.allclose(part.rpp, 1/(1+delta), atol=1e-14, rtol=0)
+        assert np.allclose(part.rvv, beta/part.beta0, atol=1e-14, rtol=0)
+        assert np.allclose(tau, tau0, atol=1e-14, rtol=0)
+        assert np.allclose((part.psigma - part0.psigma) * part0.beta0 * part0.p0c, 30, atol=1e-9, rtol=0)
 
 
 
