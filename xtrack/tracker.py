@@ -117,16 +117,28 @@ class Tracker:
 
         # Split the sequence
         parts = []
+        _element_part = []
+        _element_index_in_part=[]
         this_part = Line(elements=[], element_names=[])
+        ii_in_part = 0
+        i_part = 0
         for nn, ee in zip(line.element_names, line.elements):
             if not _check_is_collective(ee):
                 this_part.append_element(ee, nn)
+                _element_part.append(i_part)
+                _element_index_in_part.append(ii_in_part)
+                ii_in_part += 1
             else:
                 if len(this_part.elements)>0:
                     this_part.iscollective=False
                     parts.append(this_part)
+                    i_part += 1
                 parts.append(ee)
+                _element_part.append(i_part)
+                _element_index_in_part.append(None)
+                i_part += 1
                 this_part = Line(elements=[], element_names=[])
+                ii_in_part = 0
         if len(this_part.elements)>0:
             this_part.iscollective=False
             parts.append(this_part)
@@ -180,12 +192,20 @@ class Tracker:
         # Make a "marker" element to increase at_element
         self._zerodrift = Drift(_context=_buffer.context, length=0)
 
+        assert len(line.element_names) == len(supertracker.line.element_names)
+        assert len(line.element_names) == len(_element_index_in_part)
+        assert len(line.element_names) == len(_element_part)
+        assert _element_part[-1] == len(parts) - 1
+
         self.line = line
+        self.num_elements = len(line.element_names)
         self._supertracker = supertracker
         self._parts = parts
         self.track = self._track_with_collective
         self.particles_class = supertracker.particles_class
         self.particles_monitor_class = supertracker.particles_monitor_class
+        self._element_part = _element_part
+        self._element_index_in_part = _element_index_in_part
 
 
     def _init_track_no_collective(
@@ -286,7 +306,9 @@ class Tracker:
         nemitt_x=1e-6, nemitt_y=1e-6,
         n_theta=1000, delta_disp=1e-5, delta_chrom=1e-4,
         particle_co_guess=None, steps_r_matrix=None,
-        co_search_settings=None, at_elements=None,
+        co_search_settings=None, at_elements=None, at_s=None,
+        eneloss_and_damping=False,
+        symplectify=False
         ):
 
         if self.iscollective:
@@ -299,7 +321,12 @@ class Tracker:
             tracker = self
 
         if particle_ref is None:
-            particle_ref = self.particle_ref
+            if particle_co_guess is None:
+                particle_ref = self.particle_ref
+
+        if particle_ref is None and particle_co_guess is None:
+            raise ValueError(
+                "Either `particle_ref` or `particle_co_guess` must be provided")
 
         return twiss_from_tracker(tracker, particle_ref, r_sigma=r_sigma,
             nemitt_x=nemitt_x, nemitt_y=nemitt_y,
@@ -307,7 +334,9 @@ class Tracker:
             particle_co_guess=particle_co_guess,
             steps_r_matrix=steps_r_matrix,
             co_search_settings=co_search_settings,
-            at_elements=at_elements)
+            at_elements=at_elements, at_s=at_s,
+            eneloss_and_damping=eneloss_and_damping,
+            symplectify=symplectify)
 
 
     def filter_elements(self, mask=None, exclude_types_starting_with=None):
@@ -380,6 +409,13 @@ class Tracker:
     @property
     def vars(self):
         return self.line.vars
+
+    @property
+    def element_refs(self):
+        return self.line.element_refs
+
+    def configure_radiation(self, mode=None):
+        self.line.configure_radiation(mode=mode)
 
     def _build_kernel(self, save_source_as):
 
@@ -532,6 +568,10 @@ class Tracker:
             kernels = {}
         kernels.update(kernel_descriptions)
 
+        # Random number generator init kernel
+        sources.extend(self.particles_class.XoStruct.extra_sources)
+        kernels.update(self.particles_class.XoStruct.custom_kernels)
+
         sources = _handle_per_particle_blocks(sources)
 
         # Compile!
@@ -549,28 +589,52 @@ class Tracker:
     def _track_with_collective(
         self,
         particles,
-        ele_start=0,
+        ele_start=None,
         num_elements=None,
         num_turns=1,
         turn_by_turn_monitor=None,
     ):
 
-        assert ele_start == 0
+        if particles.start_tracking_at_element >= 0:
+            assert ele_start is None
+            ele_start = particles.start_tracking_at_element
+            particles.start_tracking_at_element = -1
+        else:
+            if ele_start is None:
+                ele_start = 0
+
+        assert ele_start >= 0
+        assert ele_start <= self.num_elements
+
         assert num_elements is None
         assert turn_by_turn_monitor != 'ONE_TURN_EBE'
+
 
         (flag_monitor, monitor, buffer_monitor, offset_monitor
              ) = self._get_monitor(particles, turn_by_turn_monitor, num_turns)
 
         for tt in range(num_turns):
-            if flag_monitor:
+
+            if (flag_monitor and (ele_start == 0 or tt>0)): # second condition is for delayed start
                 monitor.track(particles)
 
-            for pp in self._parts:
-                pp.track(particles)
+            for ipp, pp in enumerate(self._parts):
+                if (tt == 0 and ele_start > 0): # handle delayed start
+                    if ipp < self._element_part[ele_start]:
+                        continue
+                    if self._element_part[ele_start] == ipp:
+                        ii_in_part = self._element_index_in_part[ele_start]
+                        if ii_in_part is None:
+                            pp.track(particles)
+                        else:
+                            pp.track(particles, ele_start=ii_in_part)
+                    if ipp > self._element_part[ele_start]:
+                        pp.track(particles)
+                else: # not in first turn or no delayed start
+                    pp.track(particles)
+
                 if not isinstance(pp, Tracker):
                     self._zerodrift.track(particles, increment_at_element=True)
-
 
             # Increment at_turn and reset at_element
             # (use the supertracker to perform only end-turn actions)
@@ -584,11 +648,25 @@ class Tracker:
     def _track_no_collective(
         self,
         particles,
-        ele_start=0,
+        ele_start=None,
         num_elements=None,
         num_turns=1,
         turn_by_turn_monitor=None,
     ):
+
+        if particles.start_tracking_at_element >=0:
+            assert ele_start is None
+            ele_start = particles.start_tracking_at_element
+            particles.start_tracking_at_element = -1
+        else:
+            if ele_start is None:
+                ele_start = 0
+
+        assert ele_start >= 0
+        assert ele_start <= self.num_elements
+
+        if num_turns > 1:
+            assert num_elements is None
 
         if num_elements is None:
             # get to the end of the turn
@@ -605,21 +683,43 @@ class Tracker:
         (flag_monitor, monitor, buffer_monitor, offset_monitor
             ) = self._get_monitor(particles, turn_by_turn_monitor, num_turns)
 
+        if self.line._needs_rng and not particles._has_valid_rng_state():
+            particles._init_random_number_generator()
+
         self.track_kernel.description.n_threads = particles._capacity
-        self.track_kernel(
-            buffer=self._line_frozen._buffer.buffer,
-            ele_offsets=self.ele_offsets_dev,
-            ele_typeids=self.ele_typeids_dev,
-            particles=particles._xobject,
-            num_turns=num_turns,
-            ele_start=ele_start,
-            num_ele_track=num_elements,
-            flag_end_turn_actions=flag_end_turn_actions,
-            flag_reset_s_at_end_turn=self.reset_s_at_end_turn,
-            flag_monitor=flag_monitor,
-            buffer_tbt_monitor=buffer_monitor,
-            offset_tbt_monitor=offset_monitor,
-        )
+
+        if ele_start > 0 or num_elements < self.num_elements: # Handle first partial turn
+            self.track_kernel(
+                buffer=self._line_frozen._buffer.buffer,
+                ele_offsets=self.ele_offsets_dev,
+                ele_typeids=self.ele_typeids_dev,
+                particles=particles._xobject,
+                num_turns=1,
+                ele_start=ele_start,
+                num_ele_track=num_elements,
+                flag_end_turn_actions=flag_end_turn_actions,
+                flag_reset_s_at_end_turn=self.reset_s_at_end_turn,
+                flag_monitor=flag_monitor,
+                buffer_tbt_monitor=buffer_monitor,
+                offset_tbt_monitor=offset_monitor,
+            )
+            num_turns -= 1
+
+        if num_turns > 0:
+            self.track_kernel(
+                buffer=self._line_frozen._buffer.buffer,
+                ele_offsets=self.ele_offsets_dev,
+                ele_typeids=self.ele_typeids_dev,
+                particles=particles._xobject,
+                num_turns=num_turns,
+                ele_start=0, # always full turn
+                num_ele_track=self.num_elements, # always full turn
+                flag_end_turn_actions=flag_end_turn_actions,
+                flag_reset_s_at_end_turn=self.reset_s_at_end_turn,
+                flag_monitor=flag_monitor,
+                buffer_tbt_monitor=buffer_monitor,
+                offset_tbt_monitor=offset_monitor,
+            )
 
         self.record_last_track = monitor
 

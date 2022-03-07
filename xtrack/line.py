@@ -1,5 +1,8 @@
 import json
+import math
+import logging
 from copy import deepcopy
+
 import numpy as np
 
 import xobjects as xo
@@ -11,8 +14,6 @@ from .beam_elements import element_classes, Multipole
 from . import beam_elements
 from .beam_elements import Drift
 
-
-import logging
 
 log=logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class Line:
             eltype = class_dict[el["__class__"]]
             eldct=el.copy()
             del eldct['__class__']
-            if hasattr(el,'XoStruct'):
+            if hasattr(eltype,'XoStruct'):
                newel = eltype.from_dict(eldct,_buffer=_buffer)
             else:
                newel = eltype.from_dict(eldct)
@@ -137,29 +138,33 @@ class Line:
 
         from collections import defaultdict
         import xdeps as xd
-        import math
 
         # Extract globals values from madx
         _var_values=defaultdict(lambda :0)
-        _mad_elements_dct = {}
 
         _ref_manager = manager=xd.Manager()
         _vref=manager.ref(_var_values,'vars')
-        _fref=manager.ref(math,'f')
-        _lref = manager.ref(self.element_dict, 'line_dict')
-        _eref = _ref_manager.ref(_mad_elements_dct,'mad_elements_dct')
+        _fref=manager.ref(mathfunctions,'f')
+        _lref = manager.ref(self.element_dict, 'element_refs')
 
-        self.vars = _vref
         self._var_management = {}
         self._var_management['data'] = {}
         self._var_management['data']['var_values'] = _var_values
-        self._var_management['data']['mad_elements_dct'] = _mad_elements_dct
 
         self._var_management['manager'] = _ref_manager
         self._var_management['lref'] = _lref
         self._var_management['vref'] = _vref
         self._var_management['fref'] = _fref
-        self._var_management['eref'] = _eref
+
+    @property
+    def vars(self):
+        if self._var_management is not None:
+            return self._var_management['vref']
+
+    @property
+    def element_refs(self):
+        if self._var_management is not None:
+            return self._var_management['lref']
 
     def __init__(self, elements=(), element_names=None, particle_ref=None):
         if isinstance(elements,dict):
@@ -183,15 +188,18 @@ class Line:
                     counters[nn] += 1
                     element_names.append(new_nn)
 
+            assert len(element_names) == len(elements), (
+                "`elements` and `element_names` should have the same length"
+            )
             element_dict = dict(zip(element_names, elements))
 
-        self.element_dict=element_dict
-        self.element_names=element_names
+        self.element_dict=element_dict.copy() # avoid modifications if user provided
+        self.element_names=list(element_names).copy()
 
         self.particle_ref = particle_ref
 
         self._var_management = None
-        self.vars = None
+        self._needs_rng = False
 
     @property
     def elements(self):
@@ -242,6 +250,24 @@ class Line:
         return self.__class__(
                          elements=new_elements, element_names=new_element_names)
 
+    def configure_radiation(self, mode=None):
+        assert mode in [None, 'mean', 'quantum']
+        if mode == 'mean':
+            radiation_flag = 1
+        elif mode == 'quantum':
+            radiation_flag = 2
+        else:
+            radiation_flag = 0
+
+        for kk, ee in self.element_dict.items():
+            if hasattr(ee, 'radiation_flag'):
+                ee.radiation_flag = radiation_flag
+
+        if radiation_flag == 2:
+            self._needs_rng = True
+        else:
+            self._needs_rng = False
+
     def _freeze(self):
         self.element_names = tuple(self.element_names)
 
@@ -267,12 +293,96 @@ class Line:
     def copy(self):
         return self.__class__.from_dict(self.to_dict())
 
-    def insert_element(self, idx, element, name):
+    def insert_element(self, index=None, element=None, name=None, at_s=None):
+
+        assert name is not None
+        if element is None:
+            assert name in self.element_names
+            element  = self.element_dict[name]
+
         self._frozen_check()
-        assert name not in self.element_dict.keys()
-        assert name not in self.element_names
-        self.element_dict[name] = element
-        self.element_names.insert(idx, name)
+
+        assert ((index is not None and at_s is None) or
+                (index is None and at_s is not None)), (
+                    "Either `index` or `at_s` must be provided"
+                )
+
+        if at_s is not None:
+            s_vect_upstream = np.array(self.get_s_position(mode='upstream'))
+            s_vect_downstream = np.array(self.get_s_position(mode='downstream'))
+
+            s_start_ele = at_s
+            i_first_drift_to_cut = np.where(s_vect_downstream > s_start_ele)[0][0]
+
+            # Shortcut for thin element without drift splitting
+            if (not _is_thick(element)
+                and np.abs(s_vect_upstream[i_first_drift_to_cut]-at_s)<1e-10):
+                    return self.insert_element(index=i_first_drift_to_cut,
+                                              element=element, name=name)
+
+            if _is_thick(element):
+                s_end_ele = at_s + element.length
+            else:
+                s_end_ele = s_start_ele
+
+            i_last_drift_to_cut = np.where(s_vect_upstream < s_end_ele)[0][-1]
+            assert i_first_drift_to_cut <= i_last_drift_to_cut
+            name_first_drift_to_cut = self.element_names[i_first_drift_to_cut]
+            name_last_drift_to_cut = self.element_names[i_last_drift_to_cut]
+            first_drift_to_cut = self.element_dict[name_first_drift_to_cut]
+            last_drift_to_cut = self.element_dict[name_last_drift_to_cut]
+
+            assert _is_drift(first_drift_to_cut)
+            assert _is_drift(last_drift_to_cut)
+
+            for ii in range(i_first_drift_to_cut, i_last_drift_to_cut+1):
+                if not _is_drift(self.element_dict[self.element_names[ii]]):
+                    raise ValueError('Cannot replace active element '
+                                        f'{self.element_names[ii]}')
+
+            l_left_part = s_start_ele - s_vect_upstream[i_first_drift_to_cut]
+            l_right_part = s_vect_downstream[i_last_drift_to_cut] - s_end_ele
+            assert l_left_part >= 0
+            assert l_right_part >= 0
+            name_left = name_first_drift_to_cut + '_part0'
+            name_right = name_last_drift_to_cut + '_part1'
+
+            self.element_names[i_first_drift_to_cut:i_last_drift_to_cut] = []
+            i_insert = i_first_drift_to_cut
+
+            drift_base = self.element_dict[self.element_names[i_insert]]
+            drift_left = drift_base.copy()
+            drift_left.length = l_left_part
+            drift_right = drift_base.copy()
+            drift_right.length = l_right_part
+
+            # Insert
+            assert name_left not in self.element_names
+            assert name_right not in self.element_names
+
+            names_to_insert = []
+
+            if drift_left.length > 0:
+                names_to_insert.append(name_left)
+                self.element_dict[name_left] = drift_left
+            names_to_insert.append(name)
+            self.element_dict[name] = element
+            if drift_right.length > 0:
+                names_to_insert.append(name_right)
+                self.element_dict[name_right] = drift_right
+
+            self.element_names[i_insert] = names_to_insert[-1]
+            if len(names_to_insert) > 1:
+                for nn in names_to_insert[:-1][::-1]:
+                    self.element_names.insert(i_insert, nn)
+
+        else:
+            if _is_thick(element):
+                raise NotImplementedError('use `at_s` to insert thick elements')
+            assert name not in self.element_dict.keys()
+            self.element_dict[name] = element
+            self.element_names.insert(index, name)
+
         return self
 
     def append_element(self, element, name):
@@ -291,6 +401,9 @@ class Line:
         return ll
 
     def get_s_elements(self, mode="upstream"):
+        return self.get_s_position(mode=mode)
+
+    def get_s_position(self, at_elements=None, mode="upstream"):
 
         assert mode in ["upstream", "downstream"]
         s_prev = 0
@@ -302,7 +415,20 @@ class Line:
                 s_prev += ee.length
             if mode == "downstream":
                 s.append(s_prev)
-        return s
+
+        if at_elements is not None:
+            if np.isscalar(at_elements):
+                if isinstance(at_elements, str):
+                    assert at_elements in self.element_names
+                    idx = self.element_names.index(at_elements)
+                else:
+                    idx = at_elements
+                return s[idx]
+            else:
+                assert all([nn in self.element_names for nn in at_elements])
+                return [s[self.element_names.index(nn)] for nn in at_elements]
+        else:
+            return s
 
     def remove_inactive_multipoles(self, inplace=False):
 
@@ -545,12 +671,10 @@ class Line:
             lref = self._var_management['lref']
             manager = self._var_management['manager']
             for ii in range(min([len(knl), len(element.knl)])):
-                if lref[element_name].knl[ii] in manager.tasks.keys():
-                    manager.tasks[lref[element_name].knl[ii]].expr += knl[ii]
+                lref[element_name].knl[ii] += knl[ii]
 
             for ii in range(min([len(ksl), len(element.ksl)])):
-                if lref[element_name].ksl[ii] in manager.tasks.keys():
-                    manager.tasks[lref[element_name].ksl[ii]].expr += ksl[ii]
+                lref[element_name].ksl[ii] += ksl[ii]
 
     def _apply_madx_errors(self, madx_sequence):
         """Applies errors from MAD-X sequence to existing
@@ -626,4 +750,25 @@ class Line:
 
         return elements_not_found
 
-
+mathfunctions = type('math', (), {})
+mathfunctions.sqrt=math.sqrt
+mathfunctions.log=math.log
+mathfunctions.log10=math.log10
+mathfunctions.exp=math.exp
+mathfunctions.sin=math.sin
+mathfunctions.cos=math.cos
+mathfunctions.tan=math.tan
+mathfunctions.asin=math.asin
+mathfunctions.acos=math.acos
+mathfunctions.atan=math.atan
+mathfunctions.sinh=math.sinh
+mathfunctions.cosh=math.cosh
+mathfunctions.tanh=math.tanh
+mathfunctions.sinc=np.sinc
+mathfunctions.abs=math.fabs
+mathfunctions.erf=math.erf
+mathfunctions.erfc=math.erfc
+mathfunctions.floor=math.floor
+mathfunctions.ceil=math.ceil
+mathfunctions.round=np.round
+mathfunctions.frac=lambda x: (x%1)
