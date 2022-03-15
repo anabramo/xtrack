@@ -8,6 +8,8 @@ from scipy.constants import c as clight
 
 from .linear_normal_form import compute_linear_normal_form
 
+import xtrack as xt # To avoid circular imports
+
 DEFAULT_STEPS_R_MATRIX = {
     'dx':1e-7, 'dpx':1e-10,
     'dy':1e-7, 'dpy':1e-10,
@@ -26,6 +28,9 @@ def find_closed_orbit(tracker, particle_co_guess=None, particle_ref=None,
         particle_co_guess.py = 0
         particle_co_guess.zeta = 0
         particle_co_guess.delta = 0
+        particle_co_guess.s = 0
+        particle_co_guess.at_element = 0
+        particle_co_guess.at_turn = 0
     else:
         assert particle_ref is None
         particle_ref = particle_co_guess
@@ -100,9 +105,19 @@ def compute_one_turn_matrix_finite_differences(
             y  =    [0.,  0., dy,  0.,    0.,     0.,  0.,   0., -dy,   0.,     0.,      0.],
             py =    [0.,  0., 0., dpy,    0.,     0.,  0.,   0.,  0., -dpy,     0.,      0.],
             zeta =  [0.,  0., 0.,  0., dzeta,     0.,  0.,   0.,  0.,   0., -dzeta,      0.],
-            delta = [0.,  0., 0.,  0.,    0., ddelta,  0.,   0.,  0.,   0.,     0., -ddelta],)
+            delta = [0.,  0., 0.,  0.,    0., ddelta,  0.,   0.,  0.,   0.,     0., -ddelta],
+            )
+    if particle_on_co._xobject.at_element[0]>0:
+        part_temp.s[:] = particle_on_co._xobject.s[0]
+        part_temp.at_element[:] = particle_on_co._xobject.at_element[0]
 
-    tracker.track(part_temp)
+    if particle_on_co._xobject.at_element[0]>0:
+        i_start = particle_on_co._xobject.at_element[0]
+        tracker.track(part_temp, ele_start=i_start)
+        tracker.track(part_temp, num_elements=i_start)
+    else:
+        assert particle_on_co._xobject.at_element[0] == 0
+        tracker.track(part_temp)
 
     temp_mat = np.zeros(shape=(6, 12), dtype=np.float64)
     temp_mat[0, :] = context.nparray_from_context_array(part_temp.x)
@@ -119,13 +134,70 @@ def compute_one_turn_matrix_finite_differences(
 
     return RR
 
+def _build_auxiliary_tracker_with_extra_markers(tracker, at_s, marker_prefix):
+
+    auxline = xt.Line(elements=list(tracker.line.elements).copy(),
+                      element_names=list(tracker.line.element_names).copy())
+
+    names_inserted_markers = []
+    for ii, ss in enumerate(at_s):
+        nn = marker_prefix + f'{ii}'
+        auxline.insert_element(element=xt.Drift(length=0),
+                            name=nn,
+                            at_s=ss
+                            )
+        names_inserted_markers.append(nn)
+
+    auxtracker = xt.Tracker(
+        _buffer=tracker._buffer,
+        line=auxline,
+        track_kernel=tracker.track_kernel,
+        element_classes=tracker.element_classes,
+        particles_class=tracker.particles_class,
+        skip_end_turn_actions=tracker.skip_end_turn_actions,
+        reset_s_at_end_turn=tracker.reset_s_at_end_turn,
+        particles_monitor_class=None,
+        global_xy_limit=tracker.global_xy_limit,
+        local_particle_src=tracker.local_particle_src
+    )
+
+    return auxtracker, names_inserted_markers
+
 def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
         nemitt_x=1e-6, nemitt_y=2.5e-6,
         n_theta=1000, delta_disp=1e-5, delta_chrom = 1e-4,
         particle_co_guess=None, steps_r_matrix=None,
-        co_search_settings=None, at_elements=None,
+        co_search_settings=None, at_elements=None, at_s=None,
         eneloss_and_damping=False,
         symplectify=False):
+
+    if at_s is not None:
+
+        if np.isscalar(at_s):
+            at_s = [at_s]
+
+        assert at_elements is None
+        (auxtracker, names_inserted_markers
+            ) = _build_auxiliary_tracker_with_extra_markers(
+            tracker=tracker, at_s=at_s, marker_prefix='inserted_twiss_marker')
+
+        twres = twiss_from_tracker(
+            tracker=auxtracker,
+            particle_ref=particle_ref,
+            r_sigma=r_sigma,
+            nemitt_x=nemitt_x,
+            nemitt_y=nemitt_y,
+            n_theta=n_theta,
+            delta_disp=delta_disp,
+            delta_chrom=delta_chrom,
+            particle_co_guess=particle_co_guess,
+            steps_r_matrix=steps_r_matrix,
+            co_search_settings=co_search_settings,
+            at_elements=names_inserted_markers,
+            at_s=None,
+            eneloss_and_damping=eneloss_and_damping,
+            symplectify=symplectify)
+        return twres
 
     context = tracker._buffer.context
 
@@ -158,7 +230,7 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
     part_disp = xp.build_particles(
         _context=context,
         x_norm=0,
-        zeta=part_on_co.zeta[0],
+        zeta=part_on_co._xobject.zeta[0],
         delta=np.array([-delta_disp, +delta_disp])+part_on_co._xobject.delta[0],
         particle_on_co=part_on_co,
         scale_with_transverse_norm_emitt=(nemitt_x, nemitt_y),
@@ -219,7 +291,7 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
     part_chrom_plus = xp.build_particles(
                 _context=context,
                 x_norm=0,
-                zeta=part_on_co.zeta[0], delta=delta_chrom,
+                zeta=part_on_co._xobject.zeta[0], delta=delta_chrom,
                 particle_on_co=part_on_co,
                 scale_with_transverse_norm_emitt=(nemitt_x, nemitt_y),
                 R_matrix=RR, symplectify=symplectify)
@@ -235,7 +307,7 @@ def twiss_from_tracker(tracker, particle_ref, r_sigma=0.01,
     part_chrom_minus = xp.build_particles(
                 _context=context,
                 x_norm=0,
-                zeta=part_on_co.zeta[0], delta=-delta_chrom,
+                zeta=part_on_co._xobject.zeta[0], delta=-delta_chrom,
                 particle_on_co=part_on_co,
                 scale_with_transverse_norm_emitt=(nemitt_x, nemitt_y),
                 R_matrix=RR, symplectify=symplectify)
