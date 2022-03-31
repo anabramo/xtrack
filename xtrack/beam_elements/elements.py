@@ -36,6 +36,7 @@ class Drift(BeamElement):
     _xofields = {
         'length': xo.Float64}
     isthick=True
+    behaves_like_drift=True
 
     def get_backtrack_element(self, _context=None, _buffer=None, _offset=None):
         return self.__class__(length=-self.length,
@@ -106,22 +107,26 @@ class Elens(BeamElement):
                'residual_kick_y': xo.Float64
               }
 
-    def __init__(self,  inner_radius  = None,
-                        outer_radius  = None,
-                        current       = None,
-                        elens_length  = None,
-                        voltage       = None,
+    def __init__(self,  inner_radius = 1.,
+                        outer_radius = 1.,
+                        current      = 0.,
+                        elens_length = 0.,
+                        voltage      = 0.,
                         residual_kick_x = 0,
                         residual_kick_y = 0,
+                        _xobject = None,
                         **kwargs):
-        super().__init__(**kwargs)
-        self.inner_radius    = inner_radius
-        self.outer_radius    = outer_radius
-        self.current         = current
-        self.elens_length    = elens_length
-        self.voltage         = voltage
-        self.residual_kick_x   = residual_kick_x
-        self.residual_kick_y   = residual_kick_y
+        if _xobject is not None:
+            super().__init__(_xobject=_xobject)
+        else:
+            super().__init__(**kwargs)
+            self.inner_radius    = inner_radius
+            self.outer_radius    = outer_radius
+            self.current         = current
+            self.elens_length    = elens_length
+            self.voltage         = voltage
+            self.residual_kick_x   = residual_kick_x
+            self.residual_kick_y   = residual_kick_y
 
     def get_backtrack_element(self, _context=None, _buffer=None, _offset=None):
         return self.__class__(
@@ -139,7 +144,7 @@ Elens.XoStruct.extra_sources = [
 ## Wire Element
 
 class Wire(BeamElement):
-    
+
     _xofields={
                'wire_L_phy'  : xo.Float64,
                'wire_L_int'  : xo.Float64,
@@ -148,18 +153,22 @@ class Wire(BeamElement):
                'wire_yma'    : xo.Float64,
               }
 
-    def __init__(self,  wire_L_phy   = None,
-                        wire_L_int   = None,
-                        wire_current = None,
-                        wire_xma     = None,
-                        wire_yma     = None,
+    def __init__(self,  wire_L_phy   = 0,
+                        wire_L_int   = 0,
+                        wire_current = 0,
+                        wire_xma     = 0,
+                        wire_yma     = 0,
+                        _xobject = None,
                         **kwargs):
-        super().__init__(**kwargs)
-        self.wire_L_phy   = wire_L_phy
-        self.wire_L_int   = wire_L_int
-        self.wire_current = wire_current
-        self.wire_xma     = wire_xma
-        self.wire_yma     = wire_yma
+        if _xobject is not None:
+            super().__init__(_xobject=_xobject)
+        else:
+            super().__init__(**kwargs)
+            self.wire_L_phy   = wire_L_phy
+            self.wire_L_int   = wire_L_int
+            self.wire_current = wire_current
+            self.wire_xma     = wire_xma
+            self.wire_yma     = wire_yma
 
     def get_backtrack_element(self, _context=None, _buffer=None, _offset=None):
         return self.__class__(
@@ -171,8 +180,8 @@ class Wire(BeamElement):
                               _context=_context, _buffer=_buffer, _offset=_offset)
 
 Wire.XoStruct.extra_sources = [
-     _pkg_root.joinpath('headers/constants.h'), 
-     _pkg_root.joinpath('beam_elements/elements_src/wire.h'), 
+     _pkg_root.joinpath('headers/constants.h'),
+     _pkg_root.joinpath('beam_elements/elements_src/wire.h'),
 ]
 
 
@@ -581,9 +590,14 @@ class DipoleEdge(BeamElement):
     _xofields = {
             'r21': xo.Float64,
             'r43': xo.Float64,
+            'hgap': xo.Float64,
+            'h': xo.Float64,
+            'e1': xo.Float64,
+            'fint': xo.Float64,
             }
 
     _store_in_to_dict = ['h', 'e1', 'hgap', 'fint']
+    _skip_in_to_dict = ['r21', 'r43']
 
     def __init__(
         self,
@@ -595,44 +609,36 @@ class DipoleEdge(BeamElement):
         fint=None,
         **kwargs
     ):
-        if r21 is None and r43 is None:
-            ZERO = np.float64(0.0)
-            if hgap is None:
-                hgap = ZERO
-            if h is None:
-                h = ZERO
-            if e1 is None:
-                e1 = ZERO
-            if fint is None:
-                fint = ZERO
 
-            # Check that the argument e1 is not too close to ( 2k + 1 ) * pi/2
-            # so that the cos in the denominator of the r43 calculation and
-            # the tan in the r21 calculations blow up
-            assert not np.isclose(np.absolute(np.cos(e1)), ZERO)
+        if r21 is not None or r43 is not None:
+            raise NoImplementedError(
+                "Please initialize using `h`, `e1`, `hgap` and `fint`")
 
-            corr = np.float64(2.0) * h * hgap * fint
-            r21 = h * np.tan(e1)
-            temp = corr / np.cos(e1) * (np.float64(1) + np.sin(e1) * np.sin(e1))
+        if hgap is None:
+            hgap = 0.
+        if h is None:
+            h = 0.
+        if e1 is None:
+            e1 = 0.
+        if fint is None:
+            fint = 0.
 
-            # again, the argument to the tan calculation should be limited
-            assert not np.isclose(np.absolute(np.cos(e1 - temp)), ZERO)
-            r43 = -h * np.tan(e1 - temp)
+        # Check that the argument e1 is not too close to ( 2k + 1 ) * pi/2
+        # so that the cos in the denominator of the r43 calculation and
+        # the tan in the r21 calculations blow up
+        assert not np.isclose(np.absolute(np.cos(e1)), 0)
 
-            self.h = h
-            self.e1 = e1
-            self.hgap = hgap
-            self.fint = fint
+        corr = np.float64(2.0) * h * hgap * fint
+        r21 = h * np.tan(e1)
+        temp = corr / np.cos(e1) * (np.float64(1) + np.sin(e1) * np.sin(e1))
 
-        if r21 is not None and r43 is not None:
-            kwargs['r21'] = r21
-            kwargs['r43'] = r43
-            super().__init__(**kwargs)
-        else:
-            raise ValueError(
-                "DipoleEdge needs either coefficiants r21 and r43"
-                " or suitable values for h, e1, hgap, and fint provided"
-            )
+        # again, the argument to the tan calculation should be limited
+        assert not np.isclose(np.absolute(np.cos(e1 - temp)), 0)
+        r43 = -h * np.tan(e1 - temp)
+
+        super().__init__(h=h, hgap=hgap, e1=e1, fint=fint, r21=r21, r43=r43,
+                         **kwargs)
+
 
     def get_backtrack_element(self, _context=None, _buffer=None, _offset=None):
         return self.__class__(
@@ -683,6 +689,15 @@ class LinearTransferMatrix(BeamElement):
         'px_ref_1': xo.Float64,
         'y_ref_1': xo.Float64,
         'py_ref_1': xo.Float64,
+        'uncorrelated_rad_damping': xo.Int64,
+        'damping_factor_x':xo.Float64,
+        'damping_factor_y':xo.Float64,
+        'damping_factor_s':xo.Float64,
+        'uncorrelated_gauss_noise': xo.Int64,
+        'gauss_noise_ampl_x':xo.Float64,
+        'gauss_noise_ampl_y':xo.Float64,
+        'gauss_noise_ampl_s':xo.Float64,
+
         }
 
     def __init__(self, Q_x=0, Q_y=0,
@@ -695,6 +710,9 @@ class LinearTransferMatrix(BeamElement):
                      energy_increment=0.0, energy_ref_increment=0.0,
                      x_ref_0 = 0.0, px_ref_0 = 0.0, x_ref_1 = 0.0, px_ref_1 = 0.0,
                      y_ref_0 = 0.0, py_ref_0 = 0.0, y_ref_1 = 0.0, py_ref_1 = 0.0,
+                     damping_rate_x = 0.0, damping_rate_y = 0.0, damping_rate_s = 0.0,
+                     equ_emit_x = 0.0, equ_emit_y = 0.0, equ_emit_s = 0.0,
+                     gauss_noise_ampl_x=0.0,gauss_noise_ampl_y=0.0,gauss_noise_ampl_s=0.0,
                      **nargs):
 
         if (chroma_x==0 and chroma_y==0
@@ -760,6 +778,35 @@ class LinearTransferMatrix(BeamElement):
         # acceleration without change of reference momentum
         nargs['energy_increment'] = energy_increment
 
+        if damping_rate_x < 0.0 or damping_rate_y < 0.0 or damping_rate_s < 0.0:
+            raise ValueError('Damping rates cannot be negative')
+        if damping_rate_x > 0.0 or damping_rate_y > 0.0 or damping_rate_s > 0.0:
+            nargs['uncorrelated_rad_damping'] = True
+            nargs['damping_factor_x'] = 1.0-damping_rate_x/2.0
+            nargs['damping_factor_y'] = 1.0-damping_rate_y/2.0
+            nargs['damping_factor_s'] = 1.0-damping_rate_s/2.0
+        else:
+            nargs['uncorrelated_rad_damping'] = False
+
+        if equ_emit_x < 0.0 or equ_emit_y < 0.0 or equ_emit_s < 0.0:
+            raise ValueError('Equilibrium emittances cannot be negative')
+        nargs['uncorrelated_gauss_noise'] = False
+        nargs['gauss_noise_ampl_x'] = 0.0
+        nargs['gauss_noise_ampl_y'] = 0.0
+        nargs['gauss_noise_ampl_s'] = 0.0
+        if equ_emit_x > 0.0 or equ_emit_y > 0.0 or equ_emit_s > 0.0:
+            nargs['uncorrelated_gauss_noise'] = True
+            nargs['gauss_noise_ampl_x'] = np.sqrt(2.0*equ_emit_x*damping_rate_x/beta_x_1)
+            nargs['gauss_noise_ampl_y'] = np.sqrt(2.0*equ_emit_y*damping_rate_y/beta_y_1)
+            nargs['gauss_noise_ampl_s'] = np.sqrt(2.0*equ_emit_s*damping_rate_s/beta_s)
+
+        if gauss_noise_ampl_x < 0.0 or gauss_noise_ampl_y < 0.0 or gauss_noise_ampl_s < 0.0:
+            raise ValueError('Gaussian noise amplitude cannot be negative')
+        if gauss_noise_ampl_x > 0.0 or gauss_noise_ampl_y > 0.0 or gauss_noise_ampl_s > 0.0:
+            nargs['uncorrelated_gauss_noise'] = True
+            nargs['gauss_noise_ampl_x'] = np.sqrt(nargs['gauss_noise_ampl_x']**2+gauss_noise_ampl_x**2)
+            nargs['gauss_noise_ampl_y'] = np.sqrt(nargs['gauss_noise_ampl_y']**2+gauss_noise_ampl_y**2)
+            nargs['gauss_noise_ampl_s'] = np.sqrt(nargs['gauss_noise_ampl_s']**2+gauss_noise_ampl_s**2)
 
         super().__init__(**nargs)
 
@@ -776,6 +823,8 @@ class LinearTransferMatrix(BeamElement):
         return self.beta_prod_y*self.beta_ratio_y
 
 LinearTransferMatrix.XoStruct.extra_sources = [
+        xp.general._pkg_root.joinpath('random_number_generator/rng_src/base_rng.h'),
+        xp.general._pkg_root.joinpath('random_number_generator/rng_src/local_particle_rng.h'),
         _pkg_root.joinpath('headers/constants.h'),
         _pkg_root.joinpath('beam_elements/elements_src/lineartransfermatrix.h')]
 
