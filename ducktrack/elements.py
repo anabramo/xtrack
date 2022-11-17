@@ -1,3 +1,8 @@
+# copyright ############################### #
+# This file is part of the Xtrack Package.  #
+# Copyright (c) CERN, 2021.                 #
+# ######################################### #
+
 import numpy as np
 from scipy.constants import c as clight
 from scipy.constants import epsilon_0
@@ -53,7 +58,7 @@ class Drift(Element):
         yp = p.py * rpp
         p.x += xp * length
         p.y += yp * length
-        p.zeta += length * (p.rvv - (1 + (xp ** 2 + yp ** 2) / 2))
+        p.zeta += length * (1. - 1. / p.rvv * (1 + (xp ** 2 + yp ** 2) / 2))
         p.s += length
 
 
@@ -69,7 +74,7 @@ class DriftExact(Drift):
         lpzi = length / sqrt(opd ** 2 - p.px ** 2 - p.py ** 2)
         p.x += p.px * lpzi
         p.y += p.py * lpzi
-        p.zeta += p.rvv * length - opd * lpzi
+        p.zeta +=  length - 1 / p.rvv * opd * lpzi
         p.s += length
 
 
@@ -152,7 +157,7 @@ class Multipole(Element):
                 hyy = 0
             dpx += hxl + hxl * delta - b1l * hxx
             dpy -= hyl + hyl * delta - a1l * hyy
-            p.zeta -= chi * (hxlx - hyly)
+            p.zeta -= 1. / p.rvv * chi * (hxlx - hyly)
         p.px += dpx
         p.py += dpy
 
@@ -186,7 +191,7 @@ class RFMultipole(Element):
         pi = p._m.pi
         order = self.order
         k = 2 * pi * self.frequency / clight
-        tau = p.zeta / p.rvv / p.beta0
+        tau = p.zeta / p.beta0
         ktau = k * tau
         deg2rad = pi / 180
         knl = _arrayofsize(self.knl, order + 1)
@@ -241,7 +246,7 @@ class Cavity(Element):
         sin = p._m.sin
         pi = p._m.pi
         k = 2 * pi * self.frequency / clight
-        tau = p.zeta / p.rvv / p.beta0
+        tau = p.zeta / p.beta0
         phase = self.lag * pi / 180 - k * tau
         p.add_to_energy(p.charge_ratio * p.q0 * self.voltage * sin(phase))
 
@@ -258,7 +263,7 @@ class SawtoothCavity(Element):
     def track(self, p):
         pi = p._m.pi
         k = 2 * pi * self.frequency / clight
-        tau = p.zeta / p.rvv / p.beta0
+        tau = p.zeta / p.beta0
         phase = self.lag * pi / 180 - k * tau
         phase = (phase + pi) % (2 * pi) - pi
         p.add_to_energy(p.charge_ratio * p.q0 * self.voltage * phase)
@@ -369,25 +374,24 @@ class Elens(Element):
         # update px and py.
         p.px = xp/p.rpp
         p.py = yp/p.rpp
-        
-        
+
 
 class Wire(Element):
     """Current-carrying wire"""
 
-    _description = [("wire_L_phy"  ,"m"," Physical length of the wire ",0),
-                    ("wire_L_int"  ,"m"," Integration length (embedding drift)",0),
-                    ("wire_current","A"," Current in the wire",0),
-                    ("wire_xma"    ,"m"," x position of the wire from reference trajectory",0),
-                    ("wire_yma"    ,"m"," y position of the wire from reference trajectory",0)
+    _description = [("L_phy"  ,"m"," Physical length of the wire ",0),
+                    ("L_int"  ,"m"," Integration length (embedding drift)",0),
+                    ("current","A"," Current in the wire",0),
+                    ("xma"    ,"m"," x position of the wire from reference trajectory",0),
+                    ("yma"    ,"m"," y position of the wire from reference trajectory",0)
                     ]
 
     def track(self, p):
-        # Data from particle 
+        # Data from particle
         x      = p.x
         y      = p.y
-        D_x    = x-self.wire_xma
-        D_y    = y-self.wire_yma
+        D_x    = x-self.xma
+        D_y    = y-self.yma
         R2     = D_x*D_x + D_y*D_y
 
 
@@ -400,9 +404,9 @@ class Wire(Element):
 
 
         # Computing the kick
-        L1   = self.wire_L_int + self.wire_L_phy
-        L2   = self.wire_L_int - self.wire_L_phy
-        N    = mu_0*self.wire_current*q0/(4*np.pi*p0c/clight)
+        L1   = self.L_int + self.L_phy
+        L2   = self.L_int - self.L_phy
+        N    = mu_0*self.current*q0/(4*np.pi*p0c/clight)
 
         dpx  =  -N*D_x*(np.sqrt(L1*L1 + 4.0*R2) - np.sqrt(L2*L2 + 4.0*R2))/R2
         dpy  =  -N*D_y*(np.sqrt(L1*L1 + 4.0*R2) - np.sqrt(L2*L2 + 4.0*R2))/R2
@@ -411,7 +415,6 @@ class Wire(Element):
         # Update the particle properties
         p.px += dpx
         p.py += dpy
-        
 
 
 
@@ -686,7 +689,11 @@ class LinearTransferMatrix(Element):
         p.x,p.px = M00_x*p.x + M01_x*p.px, M10_x*p.x + M11_x*p.px
         p.y,p.py = M00_y*p.y + M01_y*p.py, M10_y*p.y + M11_y*p.py
 
-        p.delta, p.zeta = -sin_s*p.zeta/self.beta_s+cos_s*p.delta,cos_s*p.zeta+self.beta_s*sin_s*p.delta
+        pzeta_new = -sin_s*p.zeta/self.beta_s+cos_s*p.pzeta
+        zeta_new = cos_s*p.zeta+self.beta_s*sin_s*p.pzeta
+
+        p.zeta = zeta_new
+        p.pzeta = pzeta_new
 
         if self.energy_increment !=0:
             p.add_to_energy(self.energy_increment)
@@ -728,9 +735,7 @@ class LinearTransferMatrix(Element):
         if self.damping_rate_s > 0.0:
             factor = 1.0-self.damping_rate_s/2
             p.zeta *= factor
-            zeta0 = p.zeta
             p.delta *= factor
-            p.zeta = zeta0
             if self.equ_emit_s > 0.0:
                 p.delta += np.sqrt(2.0*self.equ_emit_s*self.damping_rate_s/self.beta_s)*np.random.randn(len(p.delta))
 
@@ -748,6 +753,38 @@ class LinearTransferMatrix(Element):
         p.px += self.px_ref_1
         p.y += self.disp_y_1 * p.delta + self.y_ref_1
         p.py += self.py_ref_1
+
+class FirstOrderTaylorMap(Element):
+    _description = [
+        ("length","","",0.0),
+        ("m0","","",0.0),
+        ("m1","","",0.0)]
+
+    def track(self,p):
+        if self.m0 is None:
+            self.m0 = np.zeros(6,dtype=np.float64)
+        else:
+            if len(np.shape(self.m0)) != 1 or np.shape(self.m0)[0] != 6:
+                raise ValueError(f'Wrong shape for m0: {np.shape(m0)}')
+        if self.m1 is None:
+            self.m1 = np.zeros((6,6),dtype=np.float64)
+        else:
+            if len(np.shape(self.m1)) != 2 or np.shape(self.m1)[0] != 6 or np.shape(self.m1)[1] != 6:
+                raise ValueError(f'Wrong shape for m1: {np.shape(m1)}')
+
+        beta0 = p.beta0
+        coords0 = np.array([p.x,p.px,p.y,p.py,p.zeta/beta0,p.ptau])
+        p.x = self.m0[0] + self.m1[0,0]*coords0[0] + self.m1[0,1]*coords0[1] + self.m1[0,2]*coords0[2] + self.m1[0,3]*coords0[3] + self.m1[0,4]*coords0[4] + self.m1[0,5]*coords0[5]
+        p.px = self.m0[1] + self.m1[1,0]*coords0[0] + self.m1[1,1]*coords0[1] + self.m1[1,2]*coords0[2] + self.m1[1,3]*coords0[3] + self.m1[1,4]*coords0[4] + self.m1[1,5]*coords0[5]
+        p.y = self.m0[2] + self.m1[2,0]*coords0[0] + self.m1[2,1]*coords0[1] + self.m1[2,2]*coords0[2] + self.m1[2,3]*coords0[3] + self.m1[2,4]*coords0[4] + self.m1[2,5]*coords0[5]
+        p.py = self.m0[3] + self.m1[3,0]*coords0[0] + self.m1[3,1]*coords0[1] + self.m1[3,2]*coords0[2] + self.m1[3,3]*coords0[3] + self.m1[3,4]*coords0[4] + self.m1[3,5]*coords0[5]
+        tau = self.m0[4] + self.m1[4,0]*coords0[0] + self.m1[4,1]*coords0[1] + self.m1[4,2]*coords0[2] + self.m1[4,3]*coords0[3] + self.m1[4,4]*coords0[4] + self.m1[4,5]*coords0[5]
+        ptau = self.m0[5] + self.m1[5,0]*coords0[0] + self.m1[5,1]*coords0[1] + self.m1[5,2]*coords0[2] + self.m1[5,3]*coords0[3] + self.m1[5,4]*coords0[4] + self.m1[5,5]*coords0[5]
+        p.delta = np.sqrt(ptau*ptau + 2.0*ptau/p.beta0+1.0)-1.0
+        p.zeta = tau * beta0
+
+        if self.length > 0.0:
+            raise NotImplementedError('Radiation is not implemented')
 
 __all__ = [
     "BeamBeam4D",
@@ -768,5 +805,6 @@ __all__ = [
     "SCQGaussProfile",
     "SRotation",
     "XYShift",
-    "LinearTransferMatrix"
+    "LinearTransferMatrix",
+    "FirstOrderTaylorMap"
 ]

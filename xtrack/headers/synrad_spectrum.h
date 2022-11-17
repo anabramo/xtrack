@@ -1,3 +1,8 @@
+// copyright ############################### //
+// This file is part of the Xtrack Package.  //
+// Copyright (c) CERN, 2021.                 //
+// ######################################### //
+
 #ifndef XTRACK_SYNRAD_SPECTRUM_H
 #define XTRACK_SYNRAD_SPECTRUM_H
 
@@ -13,10 +18,10 @@ void synrad_average_kick(LocalParticle* part, double curv, double lpath){
 
     double const delta  = LocalParticle_get_delta(part);
 
-    double const r = 1/(6*PI*EPSILON_0)
-                        * QELEM / (mass0*q0*q0)
-                        * curv*curv
+    double const r = QELEM/(6*PI*EPSILON_0)
+                        * q0*q0 / mass0
                         * (beta0*gamma0)*(beta0*gamma0)*(beta0*gamma0)
+	                * curv*curv
                         * lpath * (1 + delta);
 
     double const beta = beta0 * LocalParticle_get_rvv(part);
@@ -29,7 +34,7 @@ void synrad_average_kick(LocalParticle* part, double curv, double lpath){
 
 /*gpufun*/
 double SynRad(double x)
-{ 
+{
   // x :    energy normalized to the critical energy
   // returns function value _SynRadC   photon spectrum dn/dx
   // (integral of modified 1/3 order Bessel function)
@@ -131,13 +136,13 @@ double synrad_gen_photon_energy_normalized(LocalParticle *part)
   // initialize constants used in the approximate expressions
   // for SYNRAD   (integral over the modified Bessel function K5/3)
   //  xmin = 0.;
-  double const xlow = 1.; 
+  double const xlow = 1.;
   double const a1 = 2.149528241534391; // Synrad(1.e-38)/pow(1.e-38,-2./3.);
   double const a2 = 1.770750801624037; // Synrad(xlow)/exp(-xlow);
-  double const c1 = 0.; // 
+  double const c1 = 0.; //
   double const ratio = 0.908250405131381;
   double appr, exact, result;
-  do { 
+  do {
     if (LocalParticle_generate_random_double(part) < ratio) { // use low energy approximation
       result=c1+(1.-c1)*LocalParticle_generate_random_double(part);
       double tmp = result*result;
@@ -162,7 +167,10 @@ double synrad_average_number_of_photons(
 
 /*gpufun*/
 int64_t synrad_emit_photons(LocalParticle *part, double curv /* 1/m */,
-                            double lpath /* m */ ){
+                            double lpath /* m */,
+                            RecordIndex record_index,
+                            SynchrotronRadiationRecordData record
+                            ){
 
     if (fabs(curv) < 1e-15)
         return 0;
@@ -193,6 +201,23 @@ int64_t synrad_emit_photons(LocalParticle *part, double curv /* 1/m */,
         gamma = energy / m0; //
         // beta_gamma = sqrt(gamma*gamma-1); // that's how beta gamma is
         n += LocalParticle_generate_random_double_exp(part);
+        if (record){
+          int64_t i_slot = RecordIndex_get_slot(record_index);
+          // The returned slot id is negative if record is NULL or if record is full
+
+          if (i_slot>=0){
+              SynchrotronRadiationRecordData_set_photon_energy(record, i_slot,
+                                                               energy_loss);
+              SynchrotronRadiationRecordData_set_at_element(record, i_slot,
+                                          LocalParticle_get_at_element(part));
+              SynchrotronRadiationRecordData_set_at_turn(record, i_slot,
+                                          LocalParticle_get_at_turn(part));
+              SynchrotronRadiationRecordData_set_particle_id(record, i_slot,
+                                          LocalParticle_get_particle_id(part));
+              SynchrotronRadiationRecordData_set_particle_delta(record, i_slot,
+                                          LocalParticle_get_delta(part));
+          }
+        }
     }
 
     if (energy == 0.0)

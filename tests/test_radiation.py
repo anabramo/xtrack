@@ -1,3 +1,8 @@
+# copyright ############################### #
+# This file is part of the Xtrack Package.  #
+# Copyright (c) CERN, 2021.                 #
+# ######################################### #
+
 import pathlib
 import numpy as np
 from scipy.constants import e as qe
@@ -33,8 +38,7 @@ def test_radiation():
                 mass0=xp.ELECTRON_MASS_EV)
         particles_rnd = particles_ave.copy()
 
-        dct_ave_before = particles_ave.to_dict()
-        dct_rng_before = particles_rnd.to_dict()
+        particles_ave_before = particles_ave.copy(_context=xo.ContextCpu())
 
         particles_ave._init_random_number_generator()
         particles_rnd._init_random_number_generator()
@@ -44,25 +48,10 @@ def test_radiation():
 
         dct_ave = particles_ave.to_dict()
         dct_rng = particles_rnd.to_dict()
+        dct_ave_before = particles_ave_before.to_dict()
 
         assert np.allclose(dct_ave['delta'], np.mean(dct_rng['delta']),
                           atol=0, rtol=5e-3)
-
-        # assert np.allclose(dct_ave['px']*dct_ave['rpp'],
-        #                    dct_ave_before['px']*dct_ave_before['rpp'],
-        #                    atol=0, rtol=1e-10)
-
-        # assert np.allclose(dct_rng['px']*dct_rng['rpp'],
-        #                    dct_rng_before['px']*dct_rng_before['rpp'],
-        #                    atol=0, rtol=1e-10)
-
-        # assert np.allclose(dct_ave['py']*dct_ave['rpp'],
-        #                    dct_ave_before['py']*dct_ave_before['rpp'],
-        #                    atol=0, rtol=1e-10)
-
-        # assert np.allclose(dct_rng['py']*dct_rng['rpp'],
-        #                    dct_rng_before['py']*dct_rng_before['rpp'],
-        #                    atol=0, rtol=1e-10)
 
         rho = L_bend/theta_bend
         mass0_kg = (dct_ave['mass0']*qe/clight**2)
@@ -74,6 +63,22 @@ def test_radiation():
         Delta_trk = (dct_ave['ptau']-dct_ave_before['ptau'])*dct_ave['p0c']
 
         assert np.allclose(Delta_E_eV, Delta_trk, atol=0, rtol=1e-6)
+
+        # Check recorded photon energy
+        io_buffer = xt.new_io_buffer(_context=context)
+        sr_photon_record = xt.start_internal_logging(elements=[dipole_rnd],
+                            io_buffer=io_buffer, capacity=int(10e6))
+        ptest = particles_ave_before.copy(_context=context)
+        ptest._init_random_number_generator()
+
+        dipole_rnd.track(ptest)
+
+        dct_test = ptest.to_dict()
+        Delta_E_on_part = np.sum((dct_test['ptau']-dct_ave_before['ptau'])
+                                 * dct_ave['p0c'])
+        sr_photon_record.move(_context=xo.ContextCpu())
+        assert np.isclose(-Delta_E_on_part, np.sum(sr_photon_record.photon_energy),
+                          atol=0, rtol=1e-6)
 
 
 def test_ring_with_radiation():
@@ -176,3 +181,31 @@ def test_ring_with_radiation():
             )
 
         assert np.all(mon.y[:] < 1e-15)
+
+        # Test particles generation (with electrons)
+        bunch_intensity = 1e11
+        sigma_z = 5e-3
+        n_part = int(5e5)
+        nemitt_x = 0.5e-6
+        nemitt_y = 0.5e-6
+
+        tracker.configure_radiation(mode='mean')
+        pgen = xp.generate_matched_gaussian_bunch(
+                num_particles=n_part, total_intensity_particles=bunch_intensity,
+                nemitt_x=nemitt_x, nemitt_y=nemitt_y, sigma_z=sigma_z,
+                tracker=tracker)
+
+        assert pgen._buffer.context is context
+        pgen.move(_context=xo.ContextCpu())
+
+        assert np.isclose(np.std(pgen.x),
+                        np.sqrt(tw['dx'][0]**2*np.std(pgen.delta)**2
+                                + tw['betx'][0]*nemitt_x/mad.sequence.ring.beam.gamma),
+                        atol=0, rtol=1e-2)
+
+        assert np.isclose(np.std(pgen.y),
+                        np.sqrt(tw['dy'][0]**2*np.std(pgen.delta)**2
+                                + tw['bety'][0]*nemitt_y/mad.sequence.ring.beam.gamma),
+                        atol=0, rtol=1e-2)
+
+        assert np.isclose(np.std(pgen.zeta), sigma_z, atol=0, rtol=5e-3)
