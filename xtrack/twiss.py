@@ -30,7 +30,6 @@ DEFAULT_CO_SEARCH_TOL = [1e-12, 1e-12, 1e-12, 1e-12, 1e-5, 1e-12]
 
 log = logging.getLogger(__name__)
 
-
 def twiss_from_tracker(tracker, particle_ref=None, method='6d',
         particle_on_co=None, R_matrix=None, W_matrix=None, delta0=None,
         r_sigma=0.01, nemitt_x=1e-6, nemitt_y=2.5e-6,
@@ -38,13 +37,17 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
         particle_co_guess=None, steps_r_matrix=None,
         co_search_settings=None, at_elements=None, at_s=None,
         continue_on_closed_orbit_error=False,
+        freeze_longitudinal=False,
         values_at_element_exit=False,
+        radiation_method='full',
         eneloss_and_damping=False,
-        ele_start=0, ele_stop=None, twiss_init=None,
+        ele_start=None, ele_stop=None, twiss_init=None,
         skip_global_quantities=False,
         matrix_responsiveness_tol=None,
         matrix_stability_tol=None,
-        symplectify=False):
+        symplectify=False,
+        reverse=False,
+        ):
 
     assert method in ['6d', '4d'], 'Method must be `6d` or `4d`'
 
@@ -71,6 +74,30 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
     if method == '4d' and delta0 is None:
         delta0 = 0
 
+    if freeze_longitudinal:
+        kwargs = locals().copy()
+        kwargs.pop('freeze_longitudinal')
+
+        with xt.freeze_longitudinal(tracker):
+            return twiss_from_tracker(**kwargs)
+
+    if radiation_method != 'full':
+        kwargs = locals().copy()
+        kwargs.pop('radiation_method')
+        assert radiation_method in ['full', 'kick_as_co', 'scale_as_co']
+        assert freeze_longitudinal is False
+        with xt.tracker._preserve_config(tracker):
+            if radiation_method == 'kick_as_co':
+                assert isinstance(tracker._context, xo.ContextCpu) # needs to be serial
+                assert eneloss_and_damping is False
+                tracker.config.XTRACK_SYNRAD_KICK_SAME_AS_FIRST = True
+            elif radiation_method == 'scale_as_co':
+                assert isinstance(tracker._context, xo.ContextCpu) # needs to be serial
+                tracker.config.XTRACK_SYNRAD_SCALE_SAME_AS_FIRST = True
+                tracker.config.XTRACK_CAVITY_PRESERVE_ANGLE = True
+            res = twiss_from_tracker(**kwargs)
+        return res
+
     if at_s is not None:
         # Get all arguments
         kwargs = locals().copy()
@@ -94,11 +121,11 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
     mux0 = 0
     muy0 = 0
     muzeta0 = 0
-    if ele_start !=0 or ele_stop is not None:
-        if ele_start !=0 and ele_stop is None:
+    if ele_start is not None or ele_stop is not None:
+        if ele_start is not None and ele_stop is None:
             raise ValueError(
                 'ele_stop must be specified if ele_start is not 0')
-        elif ele_start == 0 and ele_stop is not None:
+        elif ele_start is None and ele_stop is not None:
             raise ValueError(
                 'ele_start must be specified if ele_stop is not None')
         assert twiss_init is not None, (
@@ -116,6 +143,8 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
         mux0 = twiss_init.mux
         muy0 = twiss_init.muy
         muzeta0 = twiss_init.muzeta
+    else:
+        ele_start = 0
 
     twiss_res = TwissTable()
 
@@ -161,13 +190,13 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
         p_disp_minus.move(_context=xo.context_default)
         p_disp_plus.move(_context=xo.context_default)
         dx_dpzeta = ((p_disp_plus.x[0] - p_disp_minus.x[0])
-                     /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))/part_on_co._xobject.beta0[0]
+                     /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))*part_on_co._xobject.beta0[0]
         dpx_dpzeta = ((p_disp_plus.px[0] - p_disp_minus.px[0])
-                     /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))/part_on_co._xobject.beta0[0]
+                     /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))*part_on_co._xobject.beta0[0]
         dy_dpzeta = ((p_disp_plus.y[0] - p_disp_minus.y[0])
-                     /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))/part_on_co._xobject.beta0[0]
+                     /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))*part_on_co._xobject.beta0[0]
         dpy_dpzeta = ((p_disp_plus.py[0] - p_disp_minus.py[0])
-                      /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))/part_on_co._xobject.beta0[0]
+                      /(p_disp_plus.ptau[0] - p_disp_minus.ptau[0]))*part_on_co._xobject.beta0[0]
 
         W[4:, :] = 0
         W[:, 4:] = 0
@@ -188,16 +217,13 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
         nemitt_x=nemitt_x,
         nemitt_y=nemitt_y,
         r_sigma=r_sigma,
-        delta_disp=delta_disp,
-        matrix_responsiveness_tol=matrix_responsiveness_tol,
-        matrix_stability_tol=matrix_stability_tol,
-        symplectify=symplectify)
+        delta_disp=delta_disp)
     twiss_res.update(twiss_res_element_by_element)
     twiss_res._ebe_fields = twiss_res_element_by_element.keys()
 
     twiss_res.particle_on_co = part_on_co.copy(_context=xo.context_default)
 
-    circumference = tracker.line.get_length()
+    circumference = tracker._tracker_data.line_length
     twiss_res['circumference'] = circumference
 
     if not skip_global_quantities:
@@ -217,7 +243,7 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
 
         dzeta = twiss_res_element_by_element['dzeta']
         qs = np.abs(twiss_res_element_by_element['muzeta'][-1])
-        eta = -dzeta[-1]/tracker.line.get_length()
+        eta = -dzeta[-1]/circumference
         alpha = eta + 1/part_on_co._xobject.gamma0[0]**2
 
         beta0 = part_on_co._xobject.beta0[0]
@@ -258,18 +284,15 @@ def twiss_from_tracker(tracker, particle_ref=None, method='6d',
     if at_elements is not None:
         twiss_res._keep_only_elements(at_elements)
 
+    if reverse:
+        twiss_res = twiss_res.reverse()
+
     return twiss_res
-
-
-
-
 
 def _propagate_optics(tracker, W_matrix, particle_on_co,
                       mux0, muy0, muzeta0,
                       ele_start, ele_stop,
-                      nemitt_x, nemitt_y, r_sigma, delta_disp,
-                      matrix_responsiveness_tol, matrix_stability_tol,
-                      symplectify):
+                      nemitt_x, nemitt_y, r_sigma, delta_disp):
 
     ctx2np = tracker._context.nparray_from_context_array
 
