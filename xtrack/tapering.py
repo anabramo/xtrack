@@ -35,11 +35,12 @@ def compensate_radiation_energy_loss(tracker, delta0=0, rtot_eneloss=1e-10, max_
         cc.voltage = 0.
         cc.frequency = 0.
 
+    tracker.configure_radiation(model='mean')
+
     print("Share energy loss among cavities (repeat until energy loss is zero)")
     with xt.tracker._preserve_config(tracker):
-        tracker.configure_radiation(model='mean')
         tracker.config.XTRACK_MULTIPOLE_TAPER = True
-        tracker.config.XTRACK_DIPOLEEDGE_TAPER =True
+        tracker.config.XTRACK_DIPOLEEDGE_TAPER = True
 
         i_iter = 0
         while True:
@@ -85,7 +86,11 @@ def compensate_radiation_energy_loss(tracker, delta0=0, rtot_eneloss=1e-10, max_
     print("  - Restore cavity voltage and frequency. Set cavity lag")
     beta0 = p_test.beta0[0]
     for icav in cavities.index:
-        vvrr = cavities.loc[icav, 'element'].voltage / cavities.loc[icav, 'voltage']
+        if cavities.loc[icav, 'voltage'] == 0:
+            vvrr = 0
+        else:
+            vvrr = (cavities.loc[icav, 'element'].voltage
+                    / cavities.loc[icav, 'voltage'])
         assert np.abs(vvrr) < 1.
         inst_phase = np.arcsin(vvrr)
         freq = cavities.loc[icav, 'frequency']

@@ -3,6 +3,7 @@
 # Copyright (c) CERN, 2021.                 #
 # ######################################### #
 
+from time import perf_counter
 import logging
 from functools import partial
 from contextlib import contextmanager
@@ -51,14 +52,14 @@ class Tracker:
         global_xy_limit=1.0,
         extra_headers=(),
         local_particle_src=None,
-        save_source_as=None,
         io_buffer=None,
         compile=True,
         enable_pipeline_hold=False,
         _element_ref_data=None,
     ):
         self.config = TrackerConfig()
-        self.XTRACK_MULTIPOLE_NO_SYNRAD=True
+        self.config.XTRACK_MULTIPOLE_NO_SYNRAD = True
+        self.config.XFIELDS_BB3D_NO_BEAMSTR = True
 
         if sequence is not None:
             raise ValueError(
@@ -93,7 +94,6 @@ class Tracker:
                 global_xy_limit=global_xy_limit,
                 extra_headers=extra_headers,
                 local_particle_src=local_particle_src,
-                save_source_as=save_source_as,
                 io_buffer=io_buffer,
                 compile=compile,
                 enable_pipeline_hold=enable_pipeline_hold)
@@ -113,7 +113,6 @@ class Tracker:
                 global_xy_limit=global_xy_limit,
                 extra_headers=extra_headers,
                 local_particle_src=local_particle_src,
-                save_source_as=save_source_as,
                 io_buffer=io_buffer,
                 compile=compile,
                 enable_pipeline_hold=enable_pipeline_hold)
@@ -136,7 +135,6 @@ class Tracker:
         global_xy_limit=1.0,
         extra_headers=(),
         local_particle_src=None,
-        save_source_as=None,
         io_buffer=None,
         compile=True,
         enable_pipeline_hold=False
@@ -153,7 +151,6 @@ class Tracker:
         self.global_xy_limit = global_xy_limit
         self.extra_headers = extra_headers
         self.local_particle_src = local_particle_src
-        self.save_source_as = save_source_as
         self._enable_pipeline_hold = enable_pipeline_hold
 
         if _buffer is None:
@@ -233,7 +230,6 @@ class Tracker:
                 extra_headers=extra_headers,
                 reset_s_at_end_turn=reset_s_at_end_turn,
                 local_particle_src=local_particle_src,
-                save_source_as=save_source_as,
                 io_buffer=self.io_buffer
                 )
         supertracker.config = self.config
@@ -272,6 +268,7 @@ class Tracker:
         self.particles_monitor_class = supertracker.particles_monitor_class
         self._element_part = _element_part
         self._element_index_in_part = _element_index_in_part
+        self._radiation_model = None
 
     def _init_track_no_collective(
         self,
@@ -288,7 +285,6 @@ class Tracker:
         global_xy_limit=1.0,
         extra_headers=(),
         local_particle_src=None,
-        save_source_as=None,
         io_buffer=None,
         compile=True,
         enable_pipeline_hold=False
@@ -344,23 +340,74 @@ class Tracker:
         self.line = line
         self.line.tracker = self
         self._tracker_data = tracker_data
+        self.num_elements = len(tracker_data.elements)
+        self._buffer = tracker_data._buffer
 
         self.particles_class = particles_class
         self.particles_monitor_class = particles_monitor_class
-        self.num_elements = len(tracker_data.elements)
         self.global_xy_limit = global_xy_limit
         self.extra_headers = extra_headers
         self.skip_end_turn_actions = skip_end_turn_actions
         self.reset_s_at_end_turn = reset_s_at_end_turn
         self.local_particle_src = local_particle_src
         self.element_classes = element_classes
-        self._buffer = tracker_data._buffer
 
         if track_kernel is None:
             track_kernel = {}
         self.track_kernel = track_kernel
 
         self.track = self._track_no_collective
+        self._radiation_model = None
+
+        if compile:
+            _ = self._current_track_kernel # This triggers compilation
+
+    def optimize_for_tracking(self, compile=True):
+        """Optimize the tracker for tracking speed.
+        """
+        if self.iscollective:
+            raise NotImplementedError("Optimization is not implemented for "
+                                      "collective trackers")
+
+        self.track_kernel = {} # Remove all kernels
+
+        print("Disable xdeps expressions")
+        self.line._var_management = None # Disable expressions
+
+        line = self.line
+
+        # Unfreeze the line
+        line.element_names = list(line.element_names)
+
+        print("Remove inactive multipoles")
+        line.remove_inactive_multipoles()
+
+        print("Merge consecutive multipoles")
+        line.merge_consecutive_multipoles()
+
+        print("Remove zero length drifts")
+        line.remove_zero_length_drifts()
+
+        print("Merge consecutive drifts")
+        line.merge_consecutive_drifts()
+
+        print("Use simple bends")
+        line.use_simple_bends()
+
+        print("Use simple quadrupoles")
+        line.use_simple_quadrupoles()
+
+        print("Rebuild tracker data")
+        tracker_data = TrackerData(
+            line=line,
+            extra_element_classes=(self.particles_monitor_class._XoStruct,),
+            _buffer=self._buffer)
+
+        self.line._freeze()
+
+        self._tracker_data = tracker_data
+        self.element_classes = tracker_data.element_classes
+        self.num_elements = len(tracker_data.elements)
 
         if compile:
             _ = self._current_track_kernel # This triggers compilation
@@ -381,7 +428,8 @@ class Tracker:
                 "Please rebuild the tracker, for example using `line.build_tracker(...)`.")
 
     def find_closed_orbit(self, particle_co_guess=None, particle_ref=None,
-                          co_search_settings={}, delta_zeta=0, delta0=None,
+                          co_search_settings={}, delta_zeta=0,
+                          delta0=None, zeta0=None,
                           continue_on_closed_orbit_error=False,
                           freeze_longitudinal=False):
 
@@ -407,7 +455,7 @@ class Tracker:
             tracker = self
 
         return find_closed_orbit(tracker, particle_co_guess=particle_co_guess,
-                                 particle_ref=particle_ref, delta0=delta0,
+                                 particle_ref=particle_ref, delta0=delta0, zeta0=zeta0,
                                  co_search_settings=co_search_settings, delta_zeta=delta_zeta,
                                  continue_on_closed_orbit_error=continue_on_closed_orbit_error)
 
@@ -428,7 +476,7 @@ class Tracker:
         return compute_one_turn_matrix_finite_differences(tracker, particle_on_co,
                                                    steps_r_matrix)
 
-    def twiss(self, particle_ref=None, delta0=None, method='6d',
+    def twiss(self, particle_ref=None, delta0=None, zeta0=None, method='6d',
         r_sigma=0.01, nemitt_x=1e-6, nemitt_y=1e-6,
         delta_disp=1e-5, delta_chrom=1e-4,
         particle_co_guess=None, R_matrix=None, W_matrix=None,
@@ -444,6 +492,7 @@ class Tracker:
         matrix_stability_tol=None,
         symplectify=False,
         reverse=False,
+        use_full_inverse=None
         ):
 
         self._check_invalidated()
@@ -474,29 +523,50 @@ class Tracker:
                  element_classes=(self.element_classes if not self.iscollective
                                     else self._supertracker.element_classes))
 
-    def configure_radiation(self, model=None, mode=None):
+    def configure_radiation(self, model=None, model_beamstrahlung=None,
+                            mode='deprecated'):
 
-        if mode is not None:
+        if mode != 'deprecated':
             raise NameError('mode is deprecated, use model instead')
 
         self._check_invalidated()
 
         assert model in [None, 'mean', 'quantum']
+        assert model_beamstrahlung in [None, 'mean', 'quantum']
+
         if model == 'mean':
             radiation_flag = 1
+            self._radiation_model = 'mean'
         elif model == 'quantum':
             radiation_flag = 2
+            self._radiation_model = 'quantum'
         else:
             radiation_flag = 0
+            self._radiation_model = None
+
+        if model_beamstrahlung == 'mean':
+            beamstrahlung_flag = 1
+            self._beamstrahlung_model = 'mean'
+        elif model_beamstrahlung == 'quantum':
+            beamstrahlung_flag = 2
+            self._beamstrahlung_model = 'quantum'
+        else:
+            beamstrahlung_flag = 0
+            self._beamstrahlung_model = None
 
         for kk, ee in self.line.element_dict.items():
             if hasattr(ee, 'radiation_flag'):
                 ee.radiation_flag = radiation_flag
 
-        if radiation_flag == 2:
+        for kk, ee in self.line.element_dict.items():
+            if hasattr(ee, 'flag_beamstrahlung'):
+                ee.flag_beamstrahlung = beamstrahlung_flag
+
+        if radiation_flag == 2 or beamstrahlung_flag == 2:
             self.line._needs_rng = True
 
-        self.config.XTRACK_MULTIPOLE_NO_SYNRAD = False
+        self.config.XTRACK_MULTIPOLE_NO_SYNRAD = (radiation_flag == 0)
+        self.config.XFIELDS_BB3D_NO_BEAMSTR = (beamstrahlung_flag == 0)
 
     def compensate_radiation_energy_loss(self, delta0=0, rtot_eneloss=1e-10,
                                     max_iter=100, **kwargs):
@@ -614,7 +684,7 @@ class Tracker:
     def _context(self):
         return self._buffer.context
 
-    def _build_kernel(self, save_source_as, compile):
+    def _build_kernel(self, compile):
 
         context = self._tracker_data._buffer.context
 
@@ -687,7 +757,7 @@ class Tracker:
 
                         // Get the pointer to and the type id of the `elem_idx`th
                         // element in `element_ref_data.elements`:
-                        void* el = ElementRefData_member_elements(elem_ref_data, elem_idx);
+                        /*gpuglmem*/ void* el = ElementRefData_member_elements(elem_ref_data, elem_idx);
                         int64_t elem_type = ElementRefData_typeid_elements(elem_ref_data, elem_idx);
 
                         switch(elem_type){
@@ -786,7 +856,6 @@ class Tracker:
             apply_to_source=[
                 partial(_handle_per_particle_blocks,
                         local_particle_src=self.local_particle_src)],
-            save_source_as=save_source_as,
             specialize=True,
             compile=compile
         )
@@ -972,8 +1041,13 @@ class Tracker:
         num_turns=None,    # defaults to 1
         turn_by_turn_monitor=None,
         freeze_longitudinal=False,
+        time=False,
         _session_to_resume=None
     ):
+
+        if time:
+            t0 = perf_counter()
+
         if freeze_longitudinal:
             raise NotImplementedError('freeze_longitudinal not implemented yet'
                                       ' for collective tracking')
@@ -1124,6 +1198,13 @@ class Tracker:
 
         self.record_last_track = monitor
 
+        if time:
+            self._context.synchronize()
+            t1 = perf_counter()
+            self.time_last_track = t1 - t0
+        else:
+            self.time_last_track = None
+
     def _track_no_collective(
         self,
         particles,
@@ -1132,8 +1213,12 @@ class Tracker:
         num_elements=None, # defaults to full lattice
         num_turns=None,    # defaults to 1
         turn_by_turn_monitor=None,
-        freeze_longitudinal=False
+        freeze_longitudinal=False,
+        time=False
     ):
+
+        if time:
+            t0 = perf_counter()
 
         if freeze_longitudinal:
             kwargs = locals().copy()
@@ -1306,6 +1391,13 @@ class Tracker:
 
         self.record_last_track = monitor
 
+        if time:
+            t1 = perf_counter()
+            self._context.synchronize()
+            self.time_last_track = t1 - t0
+        else:
+            self.time_last_track = None
+
     @staticmethod
     def _get_default_monitor_class():
         import xtrack as xt  # I have to do it like this
@@ -1441,7 +1533,7 @@ class Tracker:
         try:
             return self.track_kernel[self._hashable_config()]
         except KeyError:
-            self._build_kernel(save_source_as=None, compile=True)
+            self._build_kernel(compile=True)
             return self._current_track_kernel
 
     @_current_track_kernel.setter
