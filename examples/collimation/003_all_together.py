@@ -98,7 +98,8 @@ line = xt.Line(elements=[
 # Build tracker #
 #################
 
-tracker = line.build_tracker(global_xy_limit=1e3)
+line.build_tracker()
+line.config.XTRACK_GLOBAL_XY_LIMIT = 1e3
 
 ##########################
 # Build particles object #
@@ -115,7 +116,7 @@ particles = xp.Particles(
 #########
 
 t1 = time.time()                                          #!skip-doc
-tracker.track(particles)
+line.track(particles)
 t2 = time.time()                                          #!skip-doc
                                                           #!skip-doc
 print(f'{t2-t1=:.2f}')                                    #!skip-doc
@@ -126,12 +127,12 @@ assert np.all(particles.at_element[mask_lost] == 10)      #!skip-doc
 # Loss location refinement #
 ############################
 
-loss_loc_refinement = xt.LossLocationRefinement(tracker,
+loss_loc_refinement = xt.LossLocationRefinement(line,
                                             n_theta = 360,
                                             r_max = 0.5, # m
                                             dr = 50e-6,
                                             ds = 0.05,
-                                            save_refine_trackers=True)
+                                            save_refine_lines=True)
 
 loss_loc_refinement.refine_loss_location(particles)
 

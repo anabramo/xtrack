@@ -5,14 +5,14 @@
 
 import numpy as np
 
-DEFAULT_MATRIX_RESPONSIVENESS_TOL = 1e-15
-DEFAULT_MATRIX_STABILITY_TOL = 1e-3
+from .general import _print
+
 
 def healy_symplectify(M):
     # https://accelconf.web.cern.ch/e06/PAPERS/WEPCH152.PDF
-    #print("Symplectifying linear One-Turn-Map...")
+    #_print("Symplectifying linear One-Turn-Map...")
 
-    #print("Before symplectifying: det(M) = {}".format(np.linalg.det(M)))
+    #_print("Before symplectifying: det(M) = {}".format(np.linalg.det(M)))
     I = np.identity(6)
 
     S = np.array(
@@ -32,14 +32,14 @@ def healy_symplectify(M):
         M_new = np.matmul(I + np.matmul(S, W),
                           np.linalg.inv(I - np.matmul(S, W)))
     else:
-        print("WARNING: det(I - SW) = 0!")
+        _print("WARNING: det(I - SW) = 0!")
         V_else = np.matmul(S, np.matmul(I + M, np.linalg.inv(I - M)))
         W_else = (V_else + V_else.T) / 2
         M_new = -np.matmul(
             I + np.matmul(S, W_else), np.linalg.det(I - np.matmul(S, W_else))
         )
 
-    #print("After symplectifying: det(M) = {}".format(np.linalg.det(M_new)))
+    #_print("After symplectifying: det(M) = {}".format(np.linalg.det(M_new)))
     return M_new
 
 S = np.array([[0., 1., 0., 0., 0., 0.],
@@ -58,8 +58,38 @@ def Rot2D(mu):
                      [-np.sin(mu), np.cos(mu)]])
 
 def compute_linear_normal_form(M, symplectify=False, only_4d_block=False,
-                        responsiveness_tol=DEFAULT_MATRIX_RESPONSIVENESS_TOL,
-                        stability_tol=DEFAULT_MATRIX_STABILITY_TOL):
+                        responsiveness_tol=None,
+                        stability_tol=None):
+
+    '''
+    Compute the linear normal form of a 6x6 matrix M in the form:
+
+    M = W x Rot x W^-1
+
+    where Rot is a block diagonal matrix with 2x2 rotations.
+
+    Parameters
+    ----------
+    M : np.ndarray
+        6x6 matrix
+    symplectify : bool
+        If True, symplectify the matrix before computing the normal form
+    only_4d_block : bool
+        If True, only use the 4x4 block of M to compute the normal form
+    responsiveness_tol : float
+        Tolerance for the responsiveness of the matrix M
+    stability_tol : float
+        Tolerance for the stability of the matrix M
+
+    Returns
+    -------
+    W : np.ndarray
+        6x6 matrix
+    invW: np.ndarray
+        6x6 matrix
+    Rot : np.ndarray
+        6x6 matrix
+    '''
 
     if only_4d_block:
         M = M.copy()
@@ -69,25 +99,20 @@ def compute_linear_normal_form(M, symplectify=False, only_4d_block=False,
         M[4:, 4:] = np.array([[np.cos(muz_dummy), np.sin(muz_dummy)],
                               [-np.sin(muz_dummy), np.cos(muz_dummy)]])
 
-    if stability_tol is not None and np.abs(np.linalg.det(M)-1) > stability_tol:
-        raise ValueError(
-            f'The determinant of M is out tolerance. det={np.linalg.det(M)}')
-
-    for ii in range(6):
-        mask_non_zero = np.abs(M[:, ii]) > responsiveness_tol
-        mask_non_zero[ii] = False
-        if np.sum(mask_non_zero)<1:
-            raise ValueError(
-                'Invalid one-turn map: No coordinates respond to variations of '
-                + 'x px y py zeta delta'.split()[ii])
+    if responsiveness_tol is not None:
+        _assert_matrix_responsiveness(M, responsiveness_tol)
 
     if symplectify:
         M = healy_symplectify(M)
 
+    if stability_tol is not None:
+        _assert_matrix_determinant_within_tol(M, stability_tol)
+
+    # Diagonalize M
     w0, v0 = np.linalg.eig(M)
-    if stability_tol is not None and  np.any(np.abs(w0) > 1. + stability_tol):
-        raise ValueError('One-turn matrix is unstable. '
-                         f'Magnitudes of eigenvalues are:\n{repr(np.abs(w0))}')
+
+    if stability_tol is not None:
+        _assert_matrix_stability(w0, stability_tol)
 
     a0 = np.real(v0)
     b0 = np.imag(v0)
@@ -95,7 +120,6 @@ def compute_linear_normal_form(M, symplectify=False, only_4d_block=False,
     index_list = [0,5,1,2,3,4] # we mix them up to check the algorithm
 
     ##### Sort modes in pairs of conjugate modes #####
-
     conj_modes = np.zeros([3,2], dtype=np.int64)
     for j in [0,1]:
         conj_modes[j,0] = index_list[0]
@@ -127,12 +151,14 @@ def compute_linear_normal_form(M, symplectify=False, only_4d_block=False,
 
     ##################################################
     #### Sort modes such that (1,2,3) is close to (x,y,zeta) ####
-    for i in [1,2]:
-        if abs(v0[:,modes[0]])[0] < abs(v0[:,modes[i]])[0]:
-            modes[0], modes[i] = modes[i], modes[0]
+    # Identify the longitudinal mode
+    for i in [0,1]:
+        if abs(v0[:,modes[2]])[5] < abs(v0[:,modes[i]])[5]:
+            modes[2], modes[i] = modes[i], modes[2]
 
-    if abs(v0[:,modes[1]])[2] < abs(v0[:,modes[2]])[2]:
-        modes[2], modes[1] = modes[1], modes[2]
+    # Identify the vertical mode
+    if abs(v0[:,modes[1]])[2] < abs(v0[:,modes[0]])[2]:
+        modes[0], modes[1] = modes[1], modes[0]
 
     ##################################################
     #### Rotate eigenvectors to the Courant-Snyder parameterization ####
@@ -189,3 +215,25 @@ def compute_linear_normal_form(M, symplectify=False, only_4d_block=False,
     ##################################################
 
     return W, invW, R
+
+def _assert_matrix_responsiveness(M,
+                responsiveness_tol, only_4d=False):
+    n_check = 4 if only_4d else 6
+    for ii in range(n_check):
+        mask_non_zero = np.abs(M[:, ii]) > responsiveness_tol
+        mask_non_zero[ii] = False
+        if np.sum(mask_non_zero)<1:
+            raise ValueError(
+                'Invalid one-turn map: No coordinates respond to variations of '
+                + 'x px y py zeta delta'.split()[ii])
+
+
+def _assert_matrix_determinant_within_tol(M, tol=1e-15):
+    if np.abs(np.linalg.det(M)-1) > tol:
+        raise ValueError(
+            f'The determinant of M is out tolerance. det={np.linalg.det(M)}')
+
+def _assert_matrix_stability(eigenvals, tol=1e-3):
+    if np.any(np.abs(eigenvals) > 1. + tol):
+        raise ValueError('One-turn matrix is unstable. '
+                         f'Magnitudes of eigenvalues are:\n{repr(np.abs(eigenvals))}')

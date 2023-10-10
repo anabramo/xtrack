@@ -65,7 +65,29 @@ class MultiSetter(xo.HybridClass):
         ),
     }
 
-    def __init__(self, tracker, elements, field, index=None):
+    def __init__(self, line, elements, field, index=None):
+
+        '''
+        Create object to efficiently set and get values of a specific field of
+        several elements of a line.
+
+        Parameters
+        ----------
+        line: xtrack.Line
+            Line in which the elements are mutated
+        elements: list of int or strings
+            List of indeces or names of the elements to be mutated.
+        field: str
+            Name of the field to be mutated.
+        index: int or None
+            If the field is an array, the index of the array to be mutated.
+
+        '''
+
+        if isinstance(line, xt.Tracker):
+            tracker = line
+        else:
+            tracker = line.tracker
 
         context = tracker._context
 
@@ -82,15 +104,30 @@ class MultiSetter(xo.HybridClass):
         self._tracker_buffer = tracker_buffer
 
     def get_values(self):
+
+        '''
+        Get the values of the multisetter fields.
+        '''
+
         out = self._context.zeros(len(self.offsets), dtype=np.float64)
         kernel = self._context.kernels.get_values_at_offsets
-        kernel.description.n_threads = len(self.offsets)
+        kernel.set_n_threads(len(self.offsets))
         kernel(data=self, buffer=self._tracker_buffer.buffer, out=out)
         return out
 
     def set_values(self, values):
+
+        '''
+        Set the values of the multisetter fields.
+
+        Parameters
+        ----------
+        values: np.ndarray
+            Array of values to be set.
+        '''
+
         kernel = self._context.kernels.set_values_at_offsets
-        kernel.description.n_threads = len(self.offsets)
+        kernel.set_n_threads(len(self.offsets))
         kernel(data=self, buffer=self._tracker_buffer.buffer,
                input=xt.BeamElement._arr2ctx(self,values))
 

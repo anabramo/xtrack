@@ -6,6 +6,7 @@ import json
 
 import cffi
 
+import xobjects as xo
 import xpart as xp
 import xtrack as xt
 from xtrack.prebuild_kernels import regenerate_kernels
@@ -17,7 +18,9 @@ def test_prebuild_kernels(mocker, tmp_path):
         "test_module": {
             "config": {
                 "XTRACK_MULTIPOLE_NO_SYNRAD": True,
+                "XTRACK_GLOBAL_XY_LIMIT": 1.0,
                 "XFIELDS_BB3D_NO_BEAMSTR": True,
+                "XFIELDS_BB3D_NO_BHABHA": True,
             },
             "classes": [
                 "Drift",
@@ -54,10 +57,13 @@ def test_prebuild_kernels(mocker, tmp_path):
     # Test that reloading the kernel works
     cffi_compile = mocker.patch.object(cffi.FFI, 'compile')
 
-    tracker = xt.Tracker(line=xt.Line(elements=[xt.Drift(length=2.0)]))
+    line = xt.Line(elements=[xt.Drift(length=2.0)])
+
+    # Build the tracker on a fresh context, so that the kernel comes from a file
+    line.build_tracker(_context=xo.ContextCpu())
 
     p = xp.Particles(p0c=1e9, px=3e-6)
-    tracker.track(p)
+    line.track(p)
 
     assert p.x == 6e-6
     assert p.y == 0.0

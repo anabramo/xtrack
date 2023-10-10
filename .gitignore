@@ -11,5 +11,7 @@ examples/*/res/*
 *.egg-info
 __pycache__
 .pytest_cache
+**/.DS_Store
 xtrack/prebuilt_kernels
 !xtrack/prebuilt_kernels/_kernel_definitions.json
+checkpoint_restart.dat
