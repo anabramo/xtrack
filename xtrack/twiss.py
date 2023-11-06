@@ -29,10 +29,10 @@ DEFAULT_STEPS_R_MATRIX = {
     'dzeta':1e-6, 'ddelta':1e-6
 }
 
-DEFAULT_CO_SEARCH_TOL = [1e-11, 1e-11, 1e-11, 1e-11, 1e-5, 1e-11]
+DEFAULT_CO_SEARCH_TOL = [1e-11, 1e-11, 1e-11, 1e-11, 1e-5, 1e-9]
 
 DEFAULT_MATRIX_RESPONSIVENESS_TOL = 1e-15
-DEFAULT_MATRIX_STABILITY_TOL = 1e-3
+DEFAULT_MATRIX_STABILITY_TOL = 2e-3
 
 AT_TURN_FOR_TWISS = -10 # # To avoid writing in monitors installed in the line
 
@@ -168,6 +168,12 @@ def twiss_line(line, particle_ref=None, method=None,
             - dy_zeta: vertical crab dispersion (d y / d zeta)
             - dpx_zeta: horizontal crab dispersion (d px / d zeta)
             - dpy_zeta: vertical crab dispersion (d py / d zeta)
+            - ax_chrom: chromatic function (d alfx / d delta - alfx / betx d betx / d delta)
+            - ay_chrom: chromatic function (d alfy / d delta - alfy / bety d bety / d delta)
+            - bx_chrom: chromatic function (d betx / d delta)
+            - by_chrom: chromatic function (d bety / d delta)
+            - wx_chrom: sqrt(ax_chrom**2 + bx_chrom**2)
+            - wy_chrom: sqrt(ay_chrom**2 + by_chrom**2)
             - W_matrix: W matrix of the linear normal form
             - betx1: computed horizontal beta function (Mais-Ripken)
             - bety1: computed vertical beta function (Mais-Ripken)
@@ -264,7 +270,7 @@ def twiss_line(line, particle_ref=None, method=None,
     compute_lattice_functions=(compute_lattice_functions
                         if compute_lattice_functions is not None else True)
     compute_chromatic_properties=(compute_chromatic_properties
-                        if compute_chromatic_properties is not None else True)
+                        if compute_chromatic_properties is not None else None)
 
     if only_orbit:
         raise NotImplementedError # Tested only experimentally
@@ -507,8 +513,9 @@ def twiss_line(line, particle_ref=None, method=None,
         twiss_res._data['eigenvalues'] = eigenvalues.copy()
         twiss_res._data['rotation_matrix'] = Rot.copy()
 
-    if (compute_chromatic_properties and not skip_global_quantities
-            and not only_orbit):
+    if (not only_orbit and (
+        (compute_chromatic_properties is True)
+        or (compute_chromatic_properties is None and periodic))):
 
         cols_chrom, scalars_chrom = _compute_chromatic_functions(
             line=line,
@@ -529,7 +536,8 @@ def twiss_line(line, particle_ref=None, method=None,
             ele_stop=ele_stop,
             hide_thin_groups=hide_thin_groups,
             group_compound_elements=group_compound_elements,
-            only_markers=only_markers)
+            only_markers=only_markers,
+            periodic=periodic)
         twiss_res._data.update(cols_chrom)
         twiss_res._data.update(scalars_chrom)
         twiss_res._col_names += list(cols_chrom.keys())
@@ -934,8 +942,8 @@ def _compute_lattice_functions(Ws, use_full_inverse, s_co):
         gamx = Ws[:, 1, 0]**2 + Ws[:, 1, 1]**2
         gamy = Ws[:, 3, 2]**2 + Ws[:, 3, 3]**2
 
-        alfx = - Ws[:, 0, 0] * Ws[:, 1, 0] - Ws[:, 0, 1] * Ws[:, 1, 1]
-        alfy = - Ws[:, 2, 2] * Ws[:, 3, 2] - Ws[:, 2, 3] * Ws[:, 3, 3]
+        alfx = -Ws[:, 0, 0] * Ws[:, 1, 0] - Ws[:, 0, 1] * Ws[:, 1, 1]
+        alfy = -Ws[:, 2, 2] * Ws[:, 3, 2] - Ws[:, 2, 3] * Ws[:, 3, 3]
 
         bety1 = Ws[:, 2, 0]**2 + Ws[:, 2, 1]**2
         betx2 = Ws[:, 0, 2]**2 + Ws[:, 0, 3]**2
@@ -1062,7 +1070,8 @@ def _compute_chromatic_functions(line, twiss_init, delta_chrom, steps_r_matrix,
                     ele_start=None, ele_stop=None,
                     hide_thin_groups=False,
                     group_compound_elements=False,
-                    only_markers=False):
+                    only_markers=False,
+                    periodic=False):
 
     tw_chrom_res = []
     for dd in [-delta_chrom, delta_chrom]:
@@ -1079,16 +1088,46 @@ def _compute_chromatic_functions(line, twiss_init, delta_chrom, steps_r_matrix,
                 W_matrix=tw_init_chrom.W_matrix)
         tw_init_chrom.particle_on_co = part_chrom
 
-        RR_chrom = line.compute_one_turn_matrix_finite_differences(
-                                    particle_on_co=tw_init_chrom.particle_on_co.copy(),
-                                    steps_r_matrix=steps_r_matrix)['R_matrix']
-        (WW_chrom, _, _, _) = lnf.compute_linear_normal_form(RR_chrom,
-                                only_4d_block=method=='4d',
-                                responsiveness_tol=matrix_responsiveness_tol,
-                                stability_tol=matrix_stability_tol,
-                                symplectify=symplectify)
-        tw_init_chrom.W_matrix = WW_chrom
+        if periodic:
+            RR_chrom = line.compute_one_turn_matrix_finite_differences(
+                                        particle_on_co=tw_init_chrom.particle_on_co.copy(),
+                                        steps_r_matrix=steps_r_matrix)['R_matrix']
+            (WW_chrom, _, _, _) = lnf.compute_linear_normal_form(RR_chrom,
+                                    only_4d_block=method=='4d',
+                                    responsiveness_tol=matrix_responsiveness_tol,
+                                    stability_tol=matrix_stability_tol,
+                                    symplectify=symplectify)
+            tw_init_chrom.W_matrix = WW_chrom
+        else:
+            alfx = twiss_init.alfx
+            betx = twiss_init.betx
+            alfy = twiss_init.alfy
+            bety = twiss_init.bety
+            dx = twiss_init.dx
+            dy = twiss_init.dy
+            dpx = twiss_init.dpx
+            dpy = twiss_init.dpy
+            ax_chrom = twiss_init.ax_chrom
+            bx_chrom = twiss_init.bx_chrom
+            ay_chrom = twiss_init.ay_chrom
+            by_chrom = twiss_init.by_chrom
 
+            dbetx_dpzeta = bx_chrom * betx
+            dbety_dpzeta = by_chrom * bety
+            dalfx_dpzeta = ax_chrom + bx_chrom * alfx
+            dalfy_dpzeta = ay_chrom + by_chrom * alfy
+
+            twinit_aux = TwissInit(
+                alfx=alfx + dalfx_dpzeta * dd,
+                betx=betx + dbetx_dpzeta * dd,
+                alfy=alfy + dalfy_dpzeta * dd,
+                bety=bety + dbety_dpzeta * dd,
+                dx=dx,
+                dpx=dpx,
+                dy=dy,
+                dpy=dpy)
+            twinit_aux._complete(line, element_name=twiss_init.element_name)
+            tw_init_chrom.W_matrix = twinit_aux.W_matrix
 
         tw_chrom_res.append(
             _twiss_open(
@@ -1112,10 +1151,37 @@ def _compute_chromatic_functions(line, twiss_init, delta_chrom, steps_r_matrix,
 
     dmux = (tw_chrom_res[1].mux - tw_chrom_res[0].mux)/(2*delta_chrom)
     dmuy = (tw_chrom_res[1].muy - tw_chrom_res[0].muy)/(2*delta_chrom)
+
+    dbetx = (tw_chrom_res[1].betx - tw_chrom_res[0].betx)/(2*delta_chrom)
+    dbety = (tw_chrom_res[1].bety - tw_chrom_res[0].bety)/(2*delta_chrom)
+    dalfx = (tw_chrom_res[1].alfx - tw_chrom_res[0].alfx)/(2*delta_chrom)
+    dalfy = (tw_chrom_res[1].alfy - tw_chrom_res[0].alfy)/(2*delta_chrom)
+    betx = (tw_chrom_res[1].betx + tw_chrom_res[0].betx)/2
+    bety = (tw_chrom_res[1].bety + tw_chrom_res[0].bety)/2
+    alfx = (tw_chrom_res[1].alfx + tw_chrom_res[0].alfx)/2
+    alfy = (tw_chrom_res[1].alfy + tw_chrom_res[0].alfy)/2
+
+    # See MAD8 physics manual section 6.3
+    bx_chrom = dbetx / betx
+    by_chrom = dbety / bety
+    ax_chrom = dalfx - dbetx * alfx / betx
+    ay_chrom = dalfy - dbety * alfy / bety
+
+    wx_chrom = np.sqrt(ax_chrom**2 + bx_chrom**2)
+    wy_chrom = np.sqrt(ay_chrom**2 + by_chrom**2)
+
+    # Could be addede if needed (note that mad-x unwaps and devide by 2pi)
+    # phix_chrom = np.arctan2(ax_chrom, bx_chrom)
+    # phiy_chrom = np.arctan2(ay_chrom, by_chrom)
+
     dqx = dmux[-1]
     dqy = dmuy[-1]
 
-    cols_chrom = {'dmux': dmux, 'dmuy': dmuy}
+    cols_chrom = {'dmux': dmux, 'dmuy': dmuy,
+                  'bx_chrom': bx_chrom, 'by_chrom': by_chrom,
+                  'ax_chrom': ax_chrom, 'ay_chrom': ay_chrom,
+                  'wx_chrom': wx_chrom, 'wy_chrom': wy_chrom,
+                  }
     scalars_chrom = {'dqx': dqx, 'dqy': dqy}
 
     return cols_chrom, scalars_chrom
@@ -1588,6 +1654,8 @@ def _find_periodic_solution(line, particle_on_co, particle_ref, method,
 
     twiss_init = TwissInit(particle_on_co=part_on_co, W_matrix=W,
                            element_name=tw_init_element_name,
+                           ax_chrom=None, bx_chrom=None,
+                           ay_chrom=None, by_chrom=None,
                            reference_frame='proper')
 
     return twiss_init, RR, steps_r_matrix, eigenvalues, Rot, RR_ebe
@@ -1706,6 +1774,11 @@ def _one_turn_map(p, particle_ref, line, delta_zeta, ele_start, ele_stop):
     part.delta = p[5]
     part.at_turn = AT_TURN_FOR_TWISS
 
+    if line.energy_program is not None:
+        dp0c = line.energy_program.get_p0c_increse_per_turn_at_t_s(
+                                                        line.vv['t_turn_s'])
+        part.update_p0c_and_energy_deviations(p0c = part._xobject.p0c[0] + dp0c)
+
     line.track(part, ele_start=ele_start, ele_stop=ele_stop)
     if part.state[0] < 0:
         raise ClosedOrbitSearchError(
@@ -1773,6 +1846,9 @@ def compute_one_turn_matrix_finite_differences(
 
     if isinstance(ele_stop, str):
         ele_stop = line.element_names.index(ele_stop)
+
+    if ele_start is not None and ele_stop is not None and ele_start > ele_stop:
+        raise ValueError('ele_start > ele_stop')
 
     context = line._buffer.context
 
@@ -1949,7 +2025,9 @@ class TwissInit:
                 x=None, px=None, y=None, py=None, zeta=None, delta=None,
                 betx=None, alfx=None, bety=None, alfy=None, bets=None,
                 dx=0, dpx=0, dy=0, dpy=0, dzeta=0,
-                mux=0, muy=0, muzeta=0, reference_frame=None):
+                mux=0, muy=0, muzeta=0,
+                ax_chrom=0, bx_chrom=0, ay_chrom=0, by_chrom=0,
+                reference_frame=None):
 
         # Custom setattr needs to be bypassed for creation of attributes
         object.__setattr__(self, 'particle_on_co', None)
@@ -1998,6 +2076,10 @@ class TwissInit:
         self.muy = muy
         self.muzeta = muzeta
         self.dzeta = dzeta
+        self.ax_chrom = ax_chrom
+        self.bx_chrom = bx_chrom
+        self.ay_chrom = ay_chrom
+        self.by_chrom = by_chrom
         self.reference_frame = reference_frame
 
         if line is not None and element_name is not None:
@@ -2170,6 +2252,10 @@ class TwissInit:
             muy=self.muy,
             muzeta=self.muzeta,
             dzeta=self.dzeta,
+            ax_chrom=self.ax_chrom,
+            bx_chrom=self.bx_chrom,
+            ay_chrom=self.ay_chrom,
+            by_chrom=self.by_chrom,
             reference_frame=self.reference_frame)
 
         if self._temp_co_data is not None:
@@ -2181,8 +2267,13 @@ class TwissInit:
         return out
 
     def reverse(self):
-        out = TwissInit(particle_on_co=self.particle_on_co.copy(),
-                        W_matrix=self.W_matrix.copy())
+        out = TwissInit(
+            particle_on_co=self.particle_on_co.copy(),
+            W_matrix=self.W_matrix.copy(),
+            ax_chrom=(-self.ax_chrom if self.ax_chrom is not None else None),
+            ay_chrom=(-self.ay_chrom if self.ay_chrom is not None else None),
+            bx_chrom=self.bx_chrom,
+            by_chrom=self.by_chrom,)
         out.particle_on_co.x = -out.particle_on_co.x
         out.particle_on_co.py = -out.particle_on_co.py
         out.particle_on_co.zeta = -out.particle_on_co.zeta
@@ -2221,6 +2312,51 @@ class TwissInit:
         else:
             self.__dict__[name] = value
 
+    @property
+    def betx(self):
+        WW = self.W_matrix
+        return WW[0, 0]**2 + WW[0, 1]**2
+
+    @property
+    def bety(self):
+        WW = self.W_matrix
+        return WW[2, 2]**2 + WW[2, 3]**2
+
+    @property
+    def alfx(self):
+        WW = self.W_matrix
+        return -WW[0, 0] * WW[1, 0] - WW[0, 1] * WW[1, 1]
+
+    @property
+    def alfy(self):
+        WW = self.W_matrix
+        return -WW[2, 2] * WW[3, 2] - WW[2, 3] * WW[3, 3]
+
+    @property
+    def dx(self):
+        WW = self.W_matrix
+        return (WW[0, 5] - WW[0, 4] * WW[4, 5] / WW[4, 4]) / (
+                WW[5, 5] - WW[5, 4] * WW[4, 5] / WW[4, 4])
+
+    @property
+    def dpx(self):
+        WW = self.W_matrix
+        return (WW[1, 5] - WW[1, 4] * WW[4, 5] / WW[4, 4]) / (
+                WW[5, 5] - WW[5, 4] * WW[4, 5] / WW[4, 4])
+
+    @property
+    def dy(self):
+        WW = self.W_matrix
+        return (WW[2, 5] - WW[2, 4] * WW[4, 5] / WW[4, 4]) / (
+                WW[5, 5] - WW[5, 4] * WW[4, 5] / WW[4, 4])
+
+    @property
+    def dpy(self):
+        WW = self.W_matrix
+        return (WW[3, 5] - WW[3, 4] * WW[4, 5] / WW[4, 4]) / (
+                WW[5, 5] - WW[5, 4] * WW[4, 5] / WW[4, 4])
+
+
 class TwissTable(Table):
 
     _error_on_row_not_found = True
@@ -2258,12 +2394,25 @@ class TwissTable(Table):
 
         W = self.W_matrix[at_element]
 
+        if 'ax_chrom' in self.keys():
+            ax_chrom = self.ax_chrom[at_element]
+            bx_chrom = self.bx_chrom[at_element]
+            ay_chrom = self.ay_chrom[at_element]
+            by_chrom = self.by_chrom[at_element]
+        else:
+            ax_chrom = None
+            bx_chrom = None
+            ay_chrom = None
+            by_chrom = None
+
         return TwissInit(particle_on_co=part, W_matrix=W,
                         element_name=str(self.name[at_element]),
                         mux=self.mux[at_element],
                         muy=self.muy[at_element],
                         muzeta=self.muzeta[at_element],
                         dzeta=self.dzeta[at_element],
+                        ax_chrom=ax_chrom, bx_chrom=bx_chrom,
+                        ay_chrom=ay_chrom, by_chrom=by_chrom,
                         reference_frame=self.reference_frame)
 
     def get_betatron_sigmas(self, nemitt_x, nemitt_y):
@@ -2505,6 +2654,10 @@ class TwissTable(Table):
             out.muy = out.muy[0] - out.muy
             out.muzeta = out.muzeta[0] - out.muzeta
             out.dzeta = out.dzeta[0] - out.dzeta
+
+        if 'ax_chrom' in out._col_names:
+            out.ax_chrom = -out.ax_chrom
+            out.ay_chrom = -out.ay_chrom
 
         if hasattr(out, 'R_matrix'): out.R_matrix = None # To be implemented
         if hasattr(out, 'particle_on_co'):
@@ -2778,3 +2931,48 @@ def _build_sigma_table(Sigma, s=None, name=None):
     res_data['sigma_zeta'] = np.sqrt(Sigma[:, 4, 4])
 
     return Table(res_data)
+
+def compute_T_matrix_line(line, ele_start, ele_stop, particle_on_co=None,
+                            steps_t_matrix=None):
+
+    steps_t_matrix = _complete_steps_r_matrix_with_default(steps_t_matrix)
+
+    if particle_on_co is None:
+        tw = line.twiss(reverse=False)
+        particle_on_co = tw.get_twiss_init(ele_start).particle_on_co
+
+    R_plus = {}
+    R_minus = {}
+    p_plus = {}
+    p_minus = {}
+
+    for kk in ['x', 'px', 'y', 'py', 'zeta', 'delta']:
+
+        p_plus[kk] = particle_on_co.copy()
+        setattr(p_plus[kk], kk, getattr(particle_on_co, kk) + steps_t_matrix['d' + kk])
+        R_plus[kk] = line.compute_one_turn_matrix_finite_differences(
+                            ele_start=ele_start, ele_stop=ele_stop,
+                            particle_on_co=p_plus[kk])['R_matrix']
+
+        p_minus[kk] = particle_on_co.copy()
+        setattr(p_minus[kk], kk, getattr(particle_on_co, kk) - steps_t_matrix['d' + kk])
+        R_minus[kk] = line.compute_one_turn_matrix_finite_differences(
+                            ele_start=ele_start, ele_stop=ele_stop,
+                            particle_on_co=p_minus[kk])['R_matrix']
+
+    TT = np.zeros((6, 6, 6))
+    TT[:, :, 0] = 0.5 * (R_plus['x'] - R_minus['x']) / (
+        p_plus['x']._xobject.x[0] - p_minus['x']._xobject.x[0])
+    TT[:, :, 1] = 0.5 * (R_plus['px'] - R_minus['px']) / (
+        p_plus['px']._xobject.px[0] - p_minus['px']._xobject.px[0])
+    TT[:, :, 2] = 0.5 * (R_plus['y'] - R_minus['y']) / (
+        p_plus['y']._xobject.y[0] - p_minus['y']._xobject.y[0])
+    TT[:, :, 3] = 0.5 * (R_plus['py'] - R_minus['py']) / (
+        p_plus['py']._xobject.py[0] - p_minus['py']._xobject.py[0])
+    TT[:, :, 4] = 0.5 * (R_plus['zeta'] - R_minus['zeta']) / (
+        p_plus['zeta']._xobject.zeta[0] - p_minus['zeta']._xobject.zeta[0])
+    TT[:, :, 5] = 0.5 * (R_plus['delta'] - R_minus['delta']) / (
+        (p_plus['delta']._xobject.ptau[0] - p_minus['delta']._xobject.ptau[0])
+        / p_plus['delta']._xobject.beta0[0])
+
+    return TT
