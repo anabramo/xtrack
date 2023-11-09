@@ -57,4 +57,5 @@ class BeamInteraction:
                     at_turn = products['at_turn'],
                     parent_particle_id = products['parent_particle_id'])
 
+            new_particles._init_random_number_generator()
             particles.add_particles(new_particles)
