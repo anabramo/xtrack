@@ -53,6 +53,7 @@ class BeamInteraction:
                     delta = products['delta'],
                     mass_ratio = products['mass_ratio'],
                     charge_ratio = products['charge_ratio'],
+                    pdg_id = products['pdg_id'],
                     at_element = products['at_element'],
                     at_turn = products['at_turn'],
                     parent_particle_id = products['parent_particle_id'])
